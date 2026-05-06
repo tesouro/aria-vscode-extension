@@ -1,0 +1,184 @@
+{
+  "name": "aria-api-editor",
+  "displayName": "ARIA API Editor",
+  "description": "Extensao VS Code para editar projetos ARIA via API",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionDependencies": [
+    "vscode.microsoft-authentication"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ariaExplorer",
+          "title": "ARIA",
+          "icon": "resources/aria.svg"
+        }
+      ]
+    },
+    "views": {
+      "ariaExplorer": [
+        {
+          "id": "ariaProjectsView",
+          "name": "Projetos ARIA",
+          "icon": "resources/aria.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "ariaProjectsView",
+        "contents": "### Acesso necessario\nEntre com sua conta institucional para carregar os projetos do ARIA.\n\n[Entrar com Tesouro.gov.br](command:aria.connect)",
+        "when": "!aria.isLoggedIn"
+      }
+    ],
+    "commands": [
+      {
+        "command": "aria.connect",
+        "title": "ARIA: Conectar na API",
+        "icon": "$(account)"
+      },
+      {
+        "command": "aria.refreshTree",
+        "title": "ARIA: Atualizar Arvore",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "aria.editProjectJson",
+        "title": "Editar JSON"
+      },
+      {
+        "command": "aria.editProjectForm",
+        "title": "Editar em Formulario"
+      },
+      {
+        "command": "aria.editEndpointCode",
+        "title": "Editar TX_CODIGO",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "aria.editEndpointJson",
+        "title": "Editar JSON"
+      },
+      {
+        "command": "aria.editEndpointForm",
+        "title": "Editar em Formulario"
+      },
+      {
+        "command": "aria.saveActiveEditor",
+        "title": "ARIA: Salvar Alteracoes via API",
+        "icon": "$(save)"
+      },
+      {
+        "command": "aria.openLastPayload",
+        "title": "ARIA: Abrir Ultimo Payload do importa_json",
+        "icon": "$(output)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "aria.connect",
+          "when": "view == ariaProjectsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "aria.refreshTree",
+          "when": "view == ariaProjectsView",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "aria.editEndpointCode",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "inline"
+        },
+        {
+          "command": "aria.editEndpointCode",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@1"
+        },
+        {
+          "command": "aria.editEndpointJson",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@2"
+        },
+        {
+          "command": "aria.editEndpointForm",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@3"
+        },
+        {
+          "command": "aria.editProjectJson",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@1"
+        },
+        {
+          "command": "aria.editProjectForm",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "aria.saveActiveEditor",
+          "when": "resourceFilename =~ /\\.aria\\.(json|sql|py)$/",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ARIA API Editor",
+      "properties": {
+        "ariaApi.baseUrl": {
+          "type": "string",
+          "default": "https://ms-aria.appsdev.ocp.tesouro.gov.br/",
+          "description": "URL base da API ARIA VSCode"
+        },
+        "ariaApi.fetchProjectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Opcional: filtrar leitura por TX_PATH do projeto"
+        },
+        "ariaApi.ignoreSslErrors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ignora erros SSL/TLS ao conectar com a API"
+        },
+        "ariaApi.requireEntraLogin": {
+          "type": "boolean",
+          "default": true,
+          "description": "Exige login Microsoft Entra ID antes de conectar na API"
+        },
+        "ariaApi.allowedEmailDomains": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Opcional: lista de dominios de e-mail permitidos para login Entra ID"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {}
+}
