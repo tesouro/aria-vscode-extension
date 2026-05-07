@@ -61,16 +61,18 @@
       },
       {
         "command": "aria.editEndpointCode",
-        "title": "Editar TX_CODIGO",
+        "title": "Editar Código",
         "icon": "$(edit)"
       },
       {
         "command": "aria.editEndpointJson",
-        "title": "Editar JSON"
+        "title": "Editar JSON",
+        "icon": "$(file-code)"
       },
       {
         "command": "aria.editEndpointForm",
-        "title": "Editar em Formulario"
+        "title": "Editar em Formulario",
+        "icon": "$(list-tree)"
       },
       {
         "command": "aria.saveActiveEditor",

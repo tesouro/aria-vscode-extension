@@ -419,7 +419,7 @@ class EndpointNode extends vscode.TreeItem {
     this.contextValue = 'ariaEndpoint';
     this.command = {
       command: 'aria.editEndpointCode',
-      title: 'Editar TX_CODIGO',
+      title: 'Editar Código',
       arguments: [this]
     };
   }
@@ -1547,6 +1547,77 @@ function applyLovDisplayValues(payload: Record<string, unknown>, lovs?: AriaLovs
     }
   }
 
+  if (lovs.PERFIL?.length) {
+    const profileTokens = (() => {
+      const rawProfiles = normalized.TX_PERFIS;
+      if (Array.isArray(rawProfiles)) {
+        return rawProfiles
+          .map((item) => String(item ?? '').trim())
+          .filter((item) => item.length > 0);
+      }
+
+      const rawAsString = toStringSafe(rawProfiles);
+      if (!rawAsString.trim()) {
+        return [];
+      }
+
+      return parseListTokens(rawAsString);
+    })();
+
+    const selectedProfiles = lovs.PERFIL.filter((profile) => {
+      const profileId = String(profile.ID_PERFIL);
+      const normalizedProfileName = normalizeTextForLookup(profile.NO_PERFIL);
+      return profileTokens.some((token) => {
+        const normalizedToken = normalizeTextForLookup(token);
+        return token === profileId || normalizedToken === normalizedProfileName;
+      });
+    });
+
+    normalized.TX_PERFIS = selectedProfiles.map((profile) => profile.NO_PERFIL).join(', ');
+
+    if ('REST_CUSTOM_PERFIL' in normalized) {
+      normalized.REST_CUSTOM_PERFIL = selectedProfiles.map((profile) => ({
+        ID_PERFIL: profile.ID_PERFIL,
+        NO_PERFIL: profile.NO_PERFIL
+      }));
+    }
+  }
+
+    // Tipos de OTP (multi-select)
+    if (lovs.TIPO_OTP?.length) {
+      const otpTokens = (() => {
+        const rawOtps = normalized.ID_TIPO_OTP;
+        if (Array.isArray(rawOtps)) {
+          return rawOtps
+            .map((item) => String(item ?? '').trim())
+            .filter((item) => item.length > 0);
+        }
+        const rawAsString = toStringSafe(rawOtps);
+        if (!rawAsString.trim()) {
+          return [];
+        }
+        return parseListTokens(rawAsString);
+      })();
+
+      const selectedOtps = lovs.TIPO_OTP.filter((otp) => {
+        const otpId = String(otp.ID_TIPO_OTP);
+        const normalizedOtpName = normalizeTextForLookup(otp.NO_TIPO_OTP);
+        return otpTokens.some((token) => {
+          const normalizedToken = normalizeTextForLookup(token);
+          return token === otpId || normalizedToken === normalizedOtpName;
+        });
+      });
+
+      normalized.TX_TIPO_OTP = selectedOtps.map((otp) => otp.NO_TIPO_OTP).join(', ');
+
+      if ('REST_CUSTOM_TIPO_OTP' in normalized) {
+        normalized.REST_CUSTOM_TIPO_OTP = selectedOtps.map((otp) => ({
+          ID_TIPO_OTP: otp.ID_TIPO_OTP,
+          NO_TIPO_OTP: otp.NO_TIPO_OTP
+        }));
+      }
+    }
+
   return normalized;
 }
 
@@ -2197,6 +2268,13 @@ function buildLovOptions(key: string, lovs: AriaLovs | undefined): Array<{ value
   return undefined;
 }
 
+function parseListTokens(value: string): string[] {
+  return value
+    .split(/[\n,;]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
 function getSectionMeta(section: 'basic' | 'behavior' | 'security' | 'cache' | 'advanced' | 'metadata'): { title: string; description: string } {
   const sections = {
     basic: {
@@ -2360,6 +2438,37 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
     const strVal = value === null || value === undefined ? '' : String(value);
     const label = meta?.label || prettifyLabel(key);
     const fieldOptions = buildLovOptions(key, options?.lovs) ?? getFieldOptions(key);
+    const profileOptions = key === 'TX_PERFIS' && options?.lovs?.PERFIL?.length
+      ? options.lovs.PERFIL.map((profile) => ({ value: String(profile.ID_PERFIL), label: profile.NO_PERFIL }))
+      : undefined;
+    const selectedProfileIds = (() => {
+      if (!profileOptions?.length) {
+        return new Set<string>();
+      }
+
+      const normalizedValue = value;
+      const rawTokens = Array.isArray(normalizedValue)
+        ? normalizedValue.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0)
+        : parseListTokens(strVal);
+      if (rawTokens.length === 0) {
+        return new Set<string>();
+      }
+
+      const selected = new Set<string>();
+      for (const profile of options?.lovs?.PERFIL ?? []) {
+        const profileId = String(profile.ID_PERFIL);
+        const profileName = normalizeTextForLookup(profile.NO_PERFIL);
+        const matches = rawTokens.some((token) => {
+          const normalizedToken = normalizeTextForLookup(token);
+          return token === profileId || normalizedToken === profileName;
+        });
+        if (matches) {
+          selected.add(profileId);
+        }
+      }
+
+      return selected;
+    })();
     const isBancoEsquema = key === 'ID_BANCO_ESQUEMA' && Boolean(options?.lovs?.BANCO_EXTERNO?.length);
     const hasLovOptions = Boolean(fieldOptions) || isBancoEsquema;
     const isBoolean = meta
@@ -2383,6 +2492,48 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
           <span class="toggle-track" aria-hidden="true"></span>
           <span class="toggle-text">${escHtml(renderedLabel)}</span>
         </label>`;
+    } else if (profileOptions) {
+      const renderedOptions = profileOptions
+        .map((option) => {
+          const selected = selectedProfileIds.has(option.value) ? ' selected' : '';
+          return `<option value="${escHtml(option.value)}"${selected}>${escHtml(option.label)}</option>`;
+        })
+        .join('');
+      control = `
+        <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+        <input type="hidden" name="${escHtml(key)}" value="" />
+        <select id="${escHtml(key)}" name="${escHtml(key)}" multiple size="6">${renderedOptions}</select>`;
+      } else if (key === 'ID_TIPO_OTP' && options?.lovs?.TIPO_OTP?.length) {
+        const otpOptions = options.lovs.TIPO_OTP.map((otp) => ({ value: String(otp.ID_TIPO_OTP), label: otp.NO_TIPO_OTP }));
+        const normalizedValue = value;
+        const rawTokens = Array.isArray(normalizedValue)
+          ? normalizedValue.map((item) => String(item ?? '').trim()).filter((item) => item.length > 0)
+          : parseListTokens(strVal);
+        const selectedOtpIds = (() => {
+          if (!otpOptions.length) return new Set<string>();
+          if (rawTokens.length === 0) return new Set<string>();
+          const selected = new Set<string>();
+          for (const otp of options.lovs.TIPO_OTP) {
+            const otpId = String(otp.ID_TIPO_OTP);
+            const otpName = normalizeTextForLookup(otp.NO_TIPO_OTP);
+            const matches = rawTokens.some((token) => {
+              const normalizedToken = normalizeTextForLookup(token);
+              return token === otpId || normalizedToken === otpName;
+            });
+            if (matches) selected.add(otpId);
+          }
+          return selected;
+        })();
+        const renderedOptions = otpOptions
+          .map((option) => {
+            const selected = selectedOtpIds.has(option.value) ? ' selected' : '';
+            return `<option value="${escHtml(option.value)}"${selected}>${escHtml(option.label)}</option>`;
+          })
+          .join('');
+        control = `
+          <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+          <input type="hidden" name="${escHtml(key)}" value="" />
+          <select id="${escHtml(key)}" name="${escHtml(key)}" multiple size="6">${renderedOptions}</select>`;
     } else if (fieldOptions) {
       const renderedOptions = fieldOptions
         .map((option) => {
@@ -2594,6 +2745,9 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
     font-size: inherit;
     outline: none;
   }
+  select[multiple] {
+    min-height: 140px;
+  }
   input[type="text"]:focus, textarea:focus, select:focus {
     border-color: var(--vscode-focusBorder);
   }
@@ -2754,7 +2908,17 @@ function ariaUpdateBancoEsquema(bancoId) {
 form.addEventListener('submit', function(e) {
   e.preventDefault();
   const data = {};
-  new FormData(form).forEach(function(v, k) { data[k] = v; });
+  new FormData(form).forEach(function(v, k) {
+    if (data[k] === undefined) {
+      data[k] = v;
+      return;
+    }
+    if (Array.isArray(data[k])) {
+      data[k].push(v);
+      return;
+    }
+    data[k] = [data[k], v];
+  });
   vscode.postMessage({ command: 'save', data: data });
   status.textContent = 'Salvando...';
   status.className = 'status';
