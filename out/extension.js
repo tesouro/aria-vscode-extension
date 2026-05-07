@@ -76,6 +76,16 @@ class AriaApiClient {
         const response = await this.request('GET', '/v1/aria-vscode/custom/lovs', { id_projeto: String(projectId) });
         return asRecord(response) ?? {};
     }
+    async validateCode(payload) {
+        const response = await this.request('POST', '/v1/aria-vscode/custom/valida-codigo', undefined, {
+            p_id_tipo_codigo: payload.idTipoCodigo,
+            p_id_banco_externo: payload.idBancoExterno,
+            p_sn_modo_compatibilidade: payload.snModoCompatibilidade,
+            p_id_banco_esquema: payload.idBancoEsquema,
+            p_tx_codigo: payload.txCodigo
+        });
+        return asRecord(response) ?? {};
+    }
     async requestDataset(projectId) {
         const query = projectId ? { id_projeto: String(projectId) } : undefined;
         const response = await this.request('GET', '/v1/aria-vscode/custom/gerar-json', query);
@@ -335,6 +345,52 @@ function activate(context) {
         await vscode.commands.executeCommand('setContext', 'aria.isLoggedIn', loggedIn);
         tree.refresh();
     };
+    const getAriaClient = () => {
+        if (!client) {
+            throw new Error('Sem conexao ativa com a API.');
+        }
+        return client;
+    };
+    const isValidateCodeSuccess = (status) => {
+        const normalized = toStringSafe(status).trim().toLowerCase();
+        return !normalized || normalized === 'sucesso' || normalized === 'success' || normalized === 'ok';
+    };
+    const validateEndpointCodeBeforeSave = async (endpoint) => {
+        const validations = await getEndpointValidations();
+        const validationErrors = validateEndpointPayload(endpoint, validations);
+        if (validationErrors.length) {
+            throw new Error(validationErrors.join(' | '));
+        }
+        const result = await getAriaClient().validateCode({
+            idTipoCodigo: endpoint.ID_TIPO_CODIGO,
+            idBancoExterno: endpoint.ID_BANCO_EXTERNO,
+            snModoCompatibilidade: endpoint.SN_MODO_COMPATIBILIDADE,
+            idBancoEsquema: endpoint.ID_BANCO_ESQUEMA,
+            txCodigo: toStringSafe(endpoint.TX_CODIGO)
+        });
+        if (!isValidateCodeSuccess(result.status)) {
+            throw new Error(toStringSafe(result.mensagem) || 'A validacao remota do codigo falhou.');
+        }
+    };
+    const resolveEndpointsToValidate = (source, project, previousEndpointIds) => {
+        if (source.startsWith('endpointCode:') || source.startsWith('endpointJson:') || source.startsWith('endpointForm:')) {
+            const endpointId = Number(source.split(':')[1]);
+            return project.REST_CUSTOM.filter((endpoint) => endpoint.ID_REST_CUSTOM === endpointId);
+        }
+        if (source.startsWith('createEndpoint:agent:') || source.startsWith('createEndpoint:')) {
+            return project.REST_CUSTOM.filter((endpoint) => !previousEndpointIds.has(endpoint.ID_REST_CUSTOM));
+        }
+        if (source.startsWith('projectJson:')) {
+            return project.REST_CUSTOM;
+        }
+        return [];
+    };
+    const validateEndpointsBeforeSave = async (source, project, previousEndpointIds) => {
+        const endpoints = resolveEndpointsToValidate(source, project, previousEndpointIds);
+        for (const endpoint of endpoints) {
+            await validateEndpointCodeBeforeSave(endpoint);
+        }
+    };
     const validateSession = (session, entraSettings) => {
         const accountLabel = session.account.label || '';
         const tokenClaims = decodeJwtClaims(session.accessToken);
@@ -395,17 +451,18 @@ function activate(context) {
         output.appendLine('');
     };
     const saveWithFreshDataset = async (source, projectId, mutate) => {
-        if (!client) {
-            throw new Error('Sem conexao ativa com a API.');
-        }
-        const freshDataset = await client.getDatasetByProjectId(projectId);
+        const ariaClient = getAriaClient();
+        const freshDataset = await ariaClient.getDatasetByProjectId(projectId);
         if (freshDataset.registros.length !== 1) {
             throw new Error(`Esperado 1 projeto para salvar, mas gerar-json retornou ${freshDataset.registros.length}.`);
         }
+        const draftProject = freshDataset.registros[0];
+        const previousEndpointIds = new Set(draftProject.REST_CUSTOM.map((endpoint) => endpoint.ID_REST_CUSTOM));
         await mutate(freshDataset);
+        await validateEndpointsBeforeSave(source, draftProject, previousEndpointIds);
         await persistDebugPayload(JSON.stringify(freshDataset, null, 2), source);
-        await client.saveDataset(freshDataset);
-        dataset = await client.getProjectEndpointTree();
+        await ariaClient.saveDataset(freshDataset);
+        dataset = await ariaClient.getProjectEndpointTree();
         tree.refresh();
     };
     const getProjectDetails = async (projectId) => {
@@ -803,6 +860,58 @@ function activate(context) {
         catch (error) {
             vscode.window.showErrorMessage(`Falha ao salvar alteracoes: ${toErrorMessage(error)}`);
         }
+    }), vscode.commands.registerCommand('aria.validateActiveEditor', async () => {
+        if (!client || !dataset) {
+            vscode.window.showWarningMessage('Conecte na API primeiro antes de validar.');
+            return;
+        }
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('Nenhum editor ativo para validar na API.');
+            return;
+        }
+        const filePath = editor.document.uri.fsPath;
+        const marker = editMap.get(filePath);
+        if (!marker || marker.type !== 'endpointCode') {
+            vscode.window.showWarningMessage('A validacao de codigo so esta disponivel para o editor de codigo do endpoint.');
+            return;
+        }
+        try {
+            const ariaClient = getAriaClient();
+            const project = await getProjectDetails(marker.projectId);
+            const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
+            if (!endpoint) {
+                throw new Error('Endpoint nao encontrado no retorno de gerar-json.');
+            }
+            const validatingIndicator = vscode.window.setStatusBarMessage('$(sync~spin) ARIA: validando codigo via API...');
+            try {
+                const text = editor.document.getText();
+                const result = await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'ARIA: Validando codigo via API...'
+                }, async () => {
+                    return await ariaClient.validateCode({
+                        idTipoCodigo: endpoint.ID_TIPO_CODIGO,
+                        idBancoExterno: endpoint.ID_BANCO_EXTERNO,
+                        snModoCompatibilidade: endpoint.SN_MODO_COMPATIBILIDADE,
+                        idBancoEsquema: endpoint.ID_BANCO_ESQUEMA,
+                        txCodigo: text
+                    });
+                });
+                const message = toStringSafe(result.mensagem) || 'Validacao concluida.';
+                if (!isValidateCodeSuccess(result.status)) {
+                    vscode.window.showErrorMessage(`Validacao falhou: ${message}`);
+                    return;
+                }
+                vscode.window.showInformationMessage(message);
+            }
+            finally {
+                validatingIndicator.dispose();
+            }
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Falha ao validar codigo: ${toErrorMessage(error)}`);
+        }
     }), vscode.commands.registerCommand('aria.openLastPayload', async () => {
         if (!lastPayloadPath) {
             vscode.window.showWarningMessage('Nenhum payload foi gerado ainda nesta sessao.');
@@ -1039,6 +1148,37 @@ function buildEndpointFromExampleStructure(project, overrides) {
     const coSistema = Number(projectRecord.CO_SISTEMA ?? firstEndpoint?.CO_BANCO_EXTERNO ?? -1);
     const idBancoExterno = Number(projectRecord.ID_BANCO_EXTERNO ?? firstEndpoint?.ID_BANCO_EXTERNO ?? 0);
     const coBancoExterno = String(projectRecord.CO_BANCO_EXTERNO ?? firstEndpoint?.CO_BANCO_EXTERNO ?? '');
+    // Detect variables in code (TX_CODIGO)
+    const code = String(overrides.TX_CODIGO ?? '');
+    const variables = [];
+    // JSONPath: $.variavel ou ['variavel']
+    const jsonPathRegex = /\$\.(\w+)|\['([\w_]+)'\]/g;
+    let match;
+    while ((match = jsonPathRegex.exec(code))) {
+        const name = match[1] || match[2];
+        if (name && !variables.some(v => v.name === name)) {
+            variables.push({ name, origem: 1 });
+        }
+    }
+    // Query String: :variavel ou ?variavel= ou &variavel=
+    const qsRegex = /[:?&]([a-zA-Z_][\w_]*)=/g;
+    while ((match = qsRegex.exec(code))) {
+        const name = match[1];
+        if (name && !variables.some(v => v.name === name)) {
+            variables.push({ name, origem: 2 });
+        }
+    }
+    // Monta array VARIABLE
+    let variableArr = [];
+    if (variables.length) {
+        variableArr = variables.map((v, idx) => ({
+            ID_VARIABLE: 10000 + idx, // temporário, backend sobrescreve
+            TX_REGEX_QS: v.name,
+            NO_VARIABLE: v.name,
+            IN_ORIGEM_VARIABLE: v.origem,
+            VARIABLE_VALOR_POSSIVEL: []
+        }));
+    }
     const baseStructure = {
         ID_REST_CUSTOM: 0,
         NO_REST_CUSTOM: '',
@@ -1082,7 +1222,7 @@ function buildEndpointFromExampleStructure(project, overrides) {
         REST_CUSTOM_PERFIL: [],
         REST_CUSTOM_RESPONSE: [],
         REST_CUSTOM_JSON_SCHEMA: [],
-        VARIABLE: [],
+        VARIABLE: variableArr,
         HEADER: [],
         REST_CUSTOM_IP: [],
         REST_CUSTOM_TIPO_OTP: [],
@@ -1099,7 +1239,8 @@ function buildEndpointFromExampleStructure(project, overrides) {
                 CO_SISTEMA: coSistema
             }
         ],
-        NO_METODO: methodMap[Number(overrides.ID_METODO ?? methodFromOverrides)] ?? 'GET'
+        NO_METODO: methodMap[Number(overrides.ID_METODO ?? methodFromOverrides)] ?? 'GET',
+        VARIABLE: variableArr // garante sobrescrita
     };
 }
 function buildEndpointsSummary(project, currentEndpointId) {
@@ -2437,6 +2578,7 @@ function buildFormHtml(title, data, excludeKeys, options) {
       <div class="actions-copy">Revise os grupos abaixo e salve quando terminar. O payload enviado continua compativel com o importa_json.</div>
       <div class="actions-main">
         <span class="status" id="status"></span>
+        <button type="button" id="validateBtn">Validar Código</button>
         <button type="submit">Salvar via API</button>
       </div>
     </div>
@@ -2467,8 +2609,8 @@ function ariaUpdateBancoEsquema(bancoId) {
 }
 ` : 'function ariaUpdateBancoEsquema() {}'}
 
-form.addEventListener('submit', function(e) {
-  e.preventDefault();
+
+function collectFormData() {
   const data = {};
   new FormData(form).forEach(function(v, k) {
     if (data[k] === undefined) {
@@ -2481,8 +2623,21 @@ form.addEventListener('submit', function(e) {
     }
     data[k] = [data[k], v];
   });
+  return data;
+}
+
+form.addEventListener('submit', function(e) {
+  e.preventDefault();
+  const data = collectFormData();
   vscode.postMessage({ command: 'save', data: data });
   status.textContent = 'Salvando...';
+  status.className = 'status';
+});
+
+document.getElementById('validateBtn').addEventListener('click', function() {
+  const data = collectFormData();
+  vscode.postMessage({ command: 'validate', data: data });
+  status.textContent = 'Validando...';
   status.className = 'status';
 });
 
@@ -2497,6 +2652,14 @@ window.addEventListener('message', function(event) {
   } else if (msg.type === 'error') {
     status.textContent = 'Erro: ' + msg.message;
     status.className = 'status err';
+  } else if (msg.type === 'validate-result') {
+    if (msg.status === 'sucesso') {
+      status.textContent = 'Código válido: ' + (msg.mensagem || '');
+      status.className = 'status ok';
+    } else {
+      status.textContent = 'Erro de validação: ' + (msg.mensagem || '');
+      status.className = 'status err';
+    }
   }
 });
 </script>
@@ -2528,6 +2691,34 @@ function openFormWebview(context, title, data, excludeKeys, renderOptions, onSav
             catch (error) {
                 void panel.webview.postMessage({ type: 'error', message: toErrorMessage(error) });
                 vscode.window.showErrorMessage(`Falha ao salvar: ${toErrorMessage(error)}`);
+            }
+        }
+        else if (message.command === 'validate') {
+            try {
+                // Monta payload para validação
+                const body = {
+                    p_id_tipo_codigo: message.data.ID_TIPO_CODIGO,
+                    p_id_banco_externo: message.data.ID_BANCO_EXTERNO,
+                    p_sn_modo_compatibilidade: message.data.SN_MODO_COMPATIBILIDADE,
+                    p_id_banco_esquema: message.data.ID_BANCO_ESQUEMA,
+                    p_tx_codigo: toStringSafe(message.data.TX_CODIGO)
+                };
+                const url = 'https://ms-aria.appsdev.ocp.tesouro.gov.br/v1/aria-vscode/custom/valida-codigo';
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const result = (await res.json());
+                void panel.webview.postMessage({
+                    type: 'validate-result',
+                    status: result.status,
+                    mensagem: result.mensagem,
+                    codigo: result.codigo
+                });
+            }
+            catch (error) {
+                void panel.webview.postMessage({ type: 'validate-result', status: 'erro', mensagem: toErrorMessage(error) });
             }
         }
     }, undefined, context.subscriptions);

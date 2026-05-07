@@ -80,6 +80,11 @@
         "icon": "$(save)"
       },
       {
+        "command": "aria.validateActiveEditor",
+        "title": "ARIA: Validar Codigo via API",
+        "icon": "$(pass)"
+      },
+      {
         "command": "aria.openLastPayload",
         "title": "ARIA: Abrir Ultimo Payload do importa_json",
         "icon": "$(output)"
@@ -150,6 +155,11 @@
           "command": "aria.saveActiveEditor",
           "when": "resourceFilename =~ /\\.aria\\.(json|sql|py)$/",
           "group": "navigation"
+        },
+        {
+          "command": "aria.validateActiveEditor",
+          "when": "resourceFilename =~ /\\.aria\\.(sql|py)$/",
+          "group": "navigation@2"
         }
       ]
     },
