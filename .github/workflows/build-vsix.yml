@@ -1,0 +1,75 @@
+name: Build VSIX on Tag
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-vsix:
+    runs-on: ubuntu-latest
+    env:
+      NODE_VERSION: '18.x'
+      TAG_NAME: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Install vsce
+        run: npm install -g vsce
+
+      - name: Build VSIX package
+        run: |
+          VSIX_NAME="aria-vscode-${TAG_NAME}.vsix"
+          echo "Packing to $VSIX_NAME"
+          vsce package -o "$VSIX_NAME"
+        shell: bash
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Get or create release upload URL
+        id: get_release
+        run: |
+          set -e
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          TAG="${TAG_NAME}"
+          echo "Checking for release $TAG"
+          resp=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "${API}/releases/tags/${TAG}" || true)
+          if echo "$resp" | grep -q '"message": "Not Found"'; then
+            echo "Release not found, creating..."
+            create_resp=$(curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Release ${TAG}\",\"draft\":false,\"prerelease\":false}" "${API}/releases")
+            upload_url=$(echo "$create_resp" | jq -r .upload_url)
+          else
+            upload_url=$(echo "$resp" | jq -r .upload_url)
+          fi
+          echo "upload_url=$upload_url" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Upload VSIX to Release
+        run: |
+          set -e
+          VSIX="aria-vscode-${TAG_NAME}.vsix"
+          echo "Uploading $VSIX to release ${TAG_NAME}"
+          upload_url="${{ steps.get_release.outputs.upload_url }}"
+          upload_url=${upload_url%\{*}
+          curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/octet-stream" --data-binary @"$VSIX" "${upload_url}?name=${VSIX}"
+        shell: bash
+
+      - name: Upload VSIX artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: aria-vscode-*.vsix
