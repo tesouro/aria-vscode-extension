@@ -81,6 +81,11 @@
         "command": "aria.openLastPayload",
         "title": "ARIA: Abrir Ultimo Payload do importa_json",
         "icon": "$(output)"
+      },
+      {
+        "command": "aria.createEndpoint",
+        "title": "Novo Endpoint",
+        "icon": "$(add)"
       }
     ],
     "menus": {
@@ -118,14 +123,24 @@
           "group": "aria@3"
         },
         {
-          "command": "aria.editProjectJson",
+          "command": "aria.createEndpoint",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "inline"
+        },
+        {
+          "command": "aria.createEndpoint",
           "when": "view == ariaProjectsView && viewItem == ariaProject",
           "group": "aria@1"
         },
         {
-          "command": "aria.editProjectForm",
+          "command": "aria.editProjectJson",
           "when": "view == ariaProjectsView && viewItem == ariaProject",
           "group": "aria@2"
+        },
+        {
+          "command": "aria.editProjectForm",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@3"
         }
       ],
       "editor/title": [
@@ -168,7 +183,74 @@
           "description": "Opcional: lista de dominios de e-mail permitidos para login Entra ID"
         }
       }
-    }
+    },
+    "chatParticipants": [
+      {
+        "id": "aria.assistant",
+        "name": "aria",
+        "description": "Assistente ARIA - responde perguntas sobre endpoints e projetos carregados na extensao",
+        "isSticky": false
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "aria_create_endpoint",
+        "displayName": "ARIA: Criar Novo Endpoint",
+        "modelDescription": "Cria um novo endpoint no ARIA montando um REST_CUSTOM no formato padrao esperado pela API (estrutura base fixa) e aplicando um novo TX_PATH. Requer name e path. O projeto pode ser informado por projectId ou projectName (nome do projeto), e se nao vier, o comando tenta detectar automaticamente pela arvore de projetos/contexto. Campos opcionais: code (TX_CODIGO), method (1=GET 2=POST 3=PUT 4=DELETE), description (DS_REST_CUSTOM_CURTA). Ao criar, o comando tenta inferir defaults de metodo/conexao e valida campos obrigatorios do formulario de endpoint.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "aria_create_endpoint",
+        "inputSchema": {
+          "type": "object",
+          "required": ["name", "path"],
+          "properties": {
+            "projectId": {
+              "type": "number",
+              "description": "ID do projeto ARIA onde o endpoint sera criado. Opcional quando projectName for informado."
+            },
+            "projectName": {
+              "type": "string",
+              "description": "Nome do projeto ARIA alvo (NO_PROJETO), por exemplo: API Series Temporais."
+            },
+            "name": {
+              "type": "string",
+              "description": "Nome do endpoint (NO_REST_CUSTOM)."
+            },
+            "path": {
+              "type": "string",
+              "description": "Caminho do endpoint (TX_PATH), ex: /usuarios."
+            },
+            "code": {
+              "type": "string",
+              "description": "Codigo SQL ou Python do endpoint (TX_CODIGO)."
+            },
+            "method": {
+              "type": "number",
+              "description": "Metodo HTTP: 1=GET, 2=POST, 3=PUT, 4=DELETE. Padrao: 1."
+            },
+            "description": {
+              "type": "string",
+              "description": "Descricao curta do endpoint (DS_REST_CUSTOM_CURTA)."
+            }
+          }
+        }
+      },
+      {
+        "name": "aria_list_endpoints",
+        "displayName": "ARIA: Listar Endpoints do Projeto",
+        "modelDescription": "Lista todos os endpoints do projeto ARIA atualmente sendo editado (ou de um projeto especifico pelo ID). Retorna nome, caminho (TX_PATH), metodo HTTP e descricao de cada endpoint. Use esta ferramenta para entender o contexto do projeto quando o usuario estiver editando um endpoint.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "aria_list_endpoints",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "projectId": {
+              "type": "number",
+              "description": "ID do projeto ARIA. Se omitido, usa o projeto do arquivo sendo editado no momento."
+            }
+          }
+        }
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

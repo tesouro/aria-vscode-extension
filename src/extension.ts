@@ -26,6 +26,54 @@ interface AriaEndpoint {
   [key: string]: unknown;
 }
 
+interface EndpointFormItem {
+  ITEM_SEQUENCE: number;
+  REGION_SEQUENCE: number;
+  IS_REQUIRED: string;
+  DISPLAY_AS: string;
+  ITEM_SOURCE?: string;
+  LABEL?: string;
+  ITEM_SOURCE_TYPE?: string;
+  ITEM_NAME: string;
+  REGION?: string;
+}
+
+interface EndpointValidationItem {
+  REGION_SEQUENCE: number;
+  REGION_NAME?: string;
+  VALIDATION_SEQUENCE: number;
+  VALIDATION_NAME: string;
+  VALIDATION_TYPE: string;
+  VALIDATION_FAILURE_TEXT?: string;
+  VALIDATION_EXPRESSION1?: string;
+  CONDITION_TYPE?: string;
+  CONDITION_EXPRESSION1?: string;
+  CONDITION_EXPRESSION2?: string;
+  ASSOCIATED_ITEM?: string;
+}
+
+interface AriaBancoEsquema {
+  ID_BANCO_ESQUEMA: number;
+  NO_ESQUEMA: string;
+}
+
+interface AriaBancoExterno {
+  ID_BANCO_EXTERNO: number;
+  CO_BANCO_EXTERNO: string;
+  BANCO_ESQUEMA: AriaBancoEsquema[];
+}
+
+type AriaLovs = {
+  METODO?: Array<{ ID_METODO: number; NO_METODO: string }>;
+  TIPO_CODIGO?: Array<{ ID_TIPO_CODIGO: number; NO_TIPO_CODIGO: string }>;
+  TIPO_HEADER?: Array<{ ID_TIPO_HEADER: number; NO_TIPO_HEADER: string }>;
+  BANCO_EXTERNO?: AriaBancoExterno[];
+  PERFIL?: Array<{ ID_PERFIL: number; NO_PERFIL: string }>;
+  INSTANCIA?: Array<{ ID_INSTANCIA: number; CO_INSTANCIA: string }>;
+  TIPO_OTP?: Array<{ ID_TIPO_OTP: number; NO_TIPO_OTP: string }>;
+  SISTEMA?: Array<{ ID_SISTEMA: number; CO_SISTEMA: number }>;
+};
+
 interface ApiSettings {
   baseUrl: string;
   fetchProjectPath: string;
@@ -96,6 +144,37 @@ class AriaApiClient {
     await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
   }
 
+  public async getEndpointFormItems(): Promise<EndpointFormItem[]> {
+    const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/items-apex-endpoint');
+    const root = asRecord(response);
+    const rows = asArray(root?.registros) || [];
+    return rows.map((item) => this.mapEndpointFormItem(item));
+  }
+
+  public async getEndpointValidations(): Promise<EndpointValidationItem[]> {
+    const validations: EndpointValidationItem[] = [];
+    let endpointPath = '/v1/aria-vscode/custom/validacoes-apex';
+    const visited = new Set<string>();
+
+    while (endpointPath && !visited.has(endpointPath)) {
+      visited.add(endpointPath);
+      const response = await this.request<unknown>('GET', endpointPath);
+      const root = asRecord(response);
+      const rows = asArray(root?.registros) || [];
+      validations.push(...rows.map((item) => this.mapEndpointValidation(item)));
+
+      const next = typeof root?.next === 'string' ? root.next.trim() : '';
+      endpointPath = next || '';
+    }
+
+    return validations;
+  }
+
+  public async getLovs(projectId: number): Promise<AriaLovs> {
+    const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/lovs', { id_projeto: String(projectId) });
+    return (asRecord(response) as AriaLovs | undefined) ?? {};
+  }
+
   private async requestDataset(projectId?: number): Promise<AriaDataset> {
     const query = projectId ? { id_projeto: String(projectId) } : undefined;
     const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/gerar-json', query);
@@ -156,6 +235,39 @@ class AriaApiClient {
     }
 
     return mapped;
+  }
+
+  private mapEndpointFormItem(raw: unknown): EndpointFormItem {
+    const source = asRecord(raw) || {};
+
+    return {
+      ITEM_SEQUENCE: toNumber(source.ITEM_SEQUENCE),
+      REGION_SEQUENCE: toNumber(source.REGION_SEQUENCE),
+      IS_REQUIRED: toStringSafe(source.IS_REQUIRED),
+      DISPLAY_AS: toStringSafe(source.DISPLAY_AS),
+      ITEM_SOURCE: typeof source.ITEM_SOURCE === 'string' ? source.ITEM_SOURCE : undefined,
+      LABEL: typeof source.LABEL === 'string' ? source.LABEL : undefined,
+      ITEM_SOURCE_TYPE: typeof source.ITEM_SOURCE_TYPE === 'string' ? source.ITEM_SOURCE_TYPE : undefined,
+      ITEM_NAME: toStringSafe(source.ITEM_NAME),
+      REGION: typeof source.REGION === 'string' ? source.REGION : undefined
+    };
+  }
+
+  private mapEndpointValidation(raw: unknown): EndpointValidationItem {
+    const source = asRecord(raw) || {};
+    return {
+      REGION_SEQUENCE: toNumber(source.REGION_SEQUENCE),
+      REGION_NAME: typeof source.REGION_NAME === 'string' ? source.REGION_NAME : undefined,
+      VALIDATION_SEQUENCE: toNumber(source.VALIDATION_SEQUENCE),
+      VALIDATION_NAME: toStringSafe(source.VALIDATION_NAME),
+      VALIDATION_TYPE: toStringSafe(source.VALIDATION_TYPE),
+      VALIDATION_FAILURE_TEXT: typeof source.VALIDATION_FAILURE_TEXT === 'string' ? source.VALIDATION_FAILURE_TEXT : undefined,
+      VALIDATION_EXPRESSION1: typeof source.VALIDATION_EXPRESSION1 === 'string' ? source.VALIDATION_EXPRESSION1 : undefined,
+      CONDITION_TYPE: typeof source.CONDITION_TYPE === 'string' ? source.CONDITION_TYPE : undefined,
+      CONDITION_EXPRESSION1: typeof source.CONDITION_EXPRESSION1 === 'string' ? source.CONDITION_EXPRESSION1 : undefined,
+      CONDITION_EXPRESSION2: typeof source.CONDITION_EXPRESSION2 === 'string' ? source.CONDITION_EXPRESSION2 : undefined,
+      ASSOCIATED_ITEM: typeof source.ASSOCIATED_ITEM === 'string' ? source.ASSOCIATED_ITEM : undefined
+    };
   }
 
   private async request<T>(
@@ -358,6 +470,9 @@ class AriaTreeProvider implements vscode.TreeDataProvider<AriaNode> {
 export function activate(context: vscode.ExtensionContext): void {
   let client: AriaApiClient | undefined;
   let dataset: AriaDataset | undefined;
+  let endpointFormItemsCache: EndpointFormItem[] | undefined;
+  let endpointValidationsCache: EndpointValidationItem[] | undefined;
+  const lovsCache = new Map<number, AriaLovs>();
   let lastPayloadPath: string | undefined;
   let entraSession: vscode.AuthenticationSession | undefined;
   let requireEntraLogin = getEntraSettings().requireLogin;
@@ -486,6 +601,67 @@ export function activate(context: vscode.ExtensionContext): void {
     return project;
   };
 
+  const getEndpointFormItems = async (): Promise<EndpointFormItem[] | undefined> => {
+    if (!client) {
+      return undefined;
+    }
+
+    if (endpointFormItemsCache) {
+      return endpointFormItemsCache;
+    }
+
+    try {
+      endpointFormItemsCache = await client.getEndpointFormItems();
+      return endpointFormItemsCache;
+    } catch (error) {
+      vscode.window.showWarningMessage(
+        `Nao foi possivel carregar metadados do formulario de endpoint. Usando fallback local. Motivo: ${toErrorMessage(error)}`
+      );
+      return undefined;
+    }
+  };
+
+  const getProjectLovs = async (projectId: number): Promise<AriaLovs | undefined> => {
+    if (!client) {
+      return undefined;
+    }
+
+    if (lovsCache.has(projectId)) {
+      return lovsCache.get(projectId);
+    }
+
+    try {
+      const lovs = await client.getLovs(projectId);
+      lovsCache.set(projectId, lovs);
+      return lovs;
+    } catch (error) {
+      vscode.window.showWarningMessage(
+        `Nao foi possivel carregar LOVs do projeto ${projectId}. Motivo: ${toErrorMessage(error)}`
+      );
+      return undefined;
+    }
+  };
+
+  const getEndpointValidations = async (): Promise<EndpointValidationItem[] | undefined> => {
+    if (!client) {
+      return undefined;
+    }
+
+    if (endpointValidationsCache) {
+      return endpointValidationsCache;
+    }
+
+    try {
+      endpointValidationsCache = await client.getEndpointValidations();
+      return endpointValidationsCache;
+    } catch (error) {
+      vscode.window.showWarningMessage(
+        `Nao foi possivel carregar validacoes do formulario de endpoint. Motivo: ${toErrorMessage(error)}`
+      );
+      return undefined;
+    }
+  };
+
   const ensureEntraLogin = async (): Promise<boolean> => {
     const entraSettings = getEntraSettings();
     requireEntraLogin = entraSettings.requireLogin;
@@ -539,6 +715,9 @@ export function activate(context: vscode.ExtensionContext): void {
         await client?.close();
         client = new AriaApiClient(settings, acquireAccessToken);
         await client.connect();
+        endpointFormItemsCache = undefined;
+        endpointValidationsCache = undefined;
+        lovsCache.clear();
         dataset = await client.getProjectEndpointTree();
         tree.refresh();
         vscode.window.showInformationMessage(`Conectado a API e carregados ${dataset.registros.length} projeto(s).`);
@@ -582,17 +761,20 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!node) { return; }
 
       const project = await getProjectDetails(node.project.ID_PROJETO);
+      const lovs = await getProjectLovs(node.project.ID_PROJETO);
 
       openFormWebview(
         context,
         `Projeto: ${project.NO_PROJETO}`,
         project as Record<string, unknown>,
         ['REST_CUSTOM'],
+        { lovs },
         async (updated) => {
+          const normalizedUpdate = applyLovDisplayValues(updated, lovs);
           await saveWithFreshDataset(`projectForm:${node.project.ID_PROJETO}`, node.project.ID_PROJETO, async (draft) => {
             const idx = draft.registros.findIndex((p) => p.ID_PROJETO === node.project.ID_PROJETO);
             if (idx < 0) { throw new Error('Projeto nao encontrado no cache.'); }
-            draft.registros[idx] = mergePreservingTypes(draft.registros[idx] as Record<string, unknown>, updated) as AriaProject;
+            draft.registros[idx] = mergePreservingTypes(draft.registros[idx] as Record<string, unknown>, normalizedUpdate) as AriaProject;
           });
         }
       );
@@ -650,23 +832,109 @@ export function activate(context: vscode.ExtensionContext): void {
         throw new Error('Endpoint nao encontrado no retorno de gerar-json.');
       }
 
+      const endpointFormItems = await getEndpointFormItems();
+      const lovs = await getProjectLovs(node.project.ID_PROJETO);
+      const endpointValidations = await getEndpointValidations();
+
       openFormWebview(
         context,
         `Endpoint: ${endpoint.NO_REST_CUSTOM}`,
         endpoint as Record<string, unknown>,
         [],
+        { endpointItems: endpointFormItems, lovs },
         async (updated) => {
+          const normalizedUpdate = applyLovDisplayValues(updated, lovs);
           await saveWithFreshDataset(`endpointForm:${node.endpoint.ID_REST_CUSTOM}`, node.project.ID_PROJETO, async (draft) => {
             let found = false;
             for (const project of draft.registros) {
               const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
               if (eIdx >= 0) {
-                project.REST_CUSTOM[eIdx] = mergePreservingTypes(project.REST_CUSTOM[eIdx] as Record<string, unknown>, updated) as AriaEndpoint;
+                const merged = mergePreservingTypes(project.REST_CUSTOM[eIdx] as Record<string, unknown>, normalizedUpdate);
+                const validationErrors = validateEndpointPayload(merged, endpointValidations);
+                if (validationErrors.length) {
+                  throw new Error(validationErrors.join(' | '));
+                }
+                project.REST_CUSTOM[eIdx] = merged as AriaEndpoint;
                 found = true;
                 break;
               }
             }
             if (!found) { throw new Error('Endpoint nao encontrado no cache.'); }
+          });
+        }
+      );
+    }),
+
+    // ── Endpoint: Criar novo ─────────────────────────────────────────────────
+    vscode.commands.registerCommand('aria.createEndpoint', async (node?: ProjectNode) => {
+      if (!dataset) { vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.'); return; }
+
+      let targetProjectId: number;
+
+      if (node) {
+        targetProjectId = node.project.ID_PROJETO;
+      } else {
+        const items = dataset.registros.map((p) => ({
+          label: p.NO_PROJETO,
+          description: p.TX_PATH,
+          detail: `ID ${p.ID_PROJETO} — ${p.REST_CUSTOM.length} endpoint(s)`,
+          projectId: p.ID_PROJETO
+        }));
+        const picked = await vscode.window.showQuickPick(items, {
+          placeHolder: 'Selecione o projeto onde o novo endpoint sera criado',
+          matchOnDescription: true
+        });
+        if (!picked) { return; }
+        targetProjectId = picked.projectId;
+      }
+
+      const project = dataset.registros.find((p) => p.ID_PROJETO === targetProjectId);
+      if (!project) { return; }
+
+      const template = buildEndpointFromExampleStructure(project, {
+        NO_REST_CUSTOM: '',
+        TX_PATH: '',
+        TX_CODIGO: '',
+        DS_REST_CUSTOM_CURTA: ''
+      });
+
+      const endpointFormItems = await getEndpointFormItems();
+      const lovs = await getProjectLovs(targetProjectId);
+      const endpointValidations = await getEndpointValidations();
+
+      openFormWebview(
+        context,
+        `Novo Endpoint — ${project.NO_PROJETO}`,
+        template,
+        ['ID_REST_CUSTOM'],
+        { endpointItems: endpointFormItems, lovs },
+        async (updated) => {
+          const normalizedUpdate = applyLovDisplayValues(updated, lovs);
+          normalizedUpdate.TX_PATH = normalizeEndpointPath(normalizedUpdate.TX_PATH);
+          const noName = !normalizedUpdate.NO_REST_CUSTOM || String(normalizedUpdate.NO_REST_CUSTOM).trim() === '';
+          const noPath = !normalizedUpdate.TX_PATH || String(normalizedUpdate.TX_PATH).trim() === '';
+          if (noName || noPath) {
+            throw new Error('Nome (NO_REST_CUSTOM) e Caminho (TX_PATH) sao obrigatorios.');
+          }
+
+          if (project.REST_CUSTOM.some((e) => String(e.TX_PATH || '').toLowerCase() === String(normalizedUpdate.TX_PATH).trim().toLowerCase())) {
+            throw new Error(`Ja existe endpoint com TX_PATH "${String(normalizedUpdate.TX_PATH).trim()}".`);
+          }
+
+          await saveWithFreshDataset(`createEndpoint:${targetProjectId}`, targetProjectId, async (draft) => {
+            const proj = draft.registros.find((p) => p.ID_PROJETO === targetProjectId);
+            if (!proj) { throw new Error('Projeto nao encontrado.'); }
+
+            if (proj.REST_CUSTOM.some((e) => String(e.TX_PATH || '').toLowerCase() === String(normalizedUpdate.TX_PATH).trim().toLowerCase())) {
+              throw new Error(`Ja existe endpoint com TX_PATH "${String(normalizedUpdate.TX_PATH).trim()}".`);
+            }
+
+            const newEndpoint = buildEndpointFromExampleStructure(proj, normalizedUpdate);
+            const validationErrors = validateEndpointPayload(newEndpoint, endpointValidations);
+            if (validationErrors.length) {
+              throw new Error(validationErrors.join(' | '));
+            }
+            proj.REST_CUSTOM.push(newEndpoint as AriaEndpoint);
           });
         }
       );
@@ -770,6 +1038,267 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  // ── Copilot: Language Model Tool ─────────────────────────────────────────
+  interface ListEndpointsInput {
+    projectId?: number;
+  }
+
+  interface CreateEndpointInput {
+    projectId?: number;
+    projectName?: string;
+    name: string;
+    path: string;
+    code?: string;
+    method?: number;
+    description?: string;
+  }
+
+  context.subscriptions.push(
+    vscode.lm.registerTool<ListEndpointsInput>('aria_list_endpoints', {
+      prepareInvocation(_options, _token) {
+        return { invocationMessage: 'Buscando endpoints do projeto ARIA...' };
+      },
+      async invoke(options, _token) {
+        const projects = dataset?.registros ?? [];
+        let targetProject: AriaProject | undefined;
+
+        if (options.input.projectId !== undefined) {
+          targetProject = projects.find((p) => p.ID_PROJETO === options.input.projectId);
+        } else {
+          const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+          if (activeFile) {
+            const marker = editMap.get(activeFile);
+            if (marker) {
+              targetProject = projects.find((p) => p.ID_PROJETO === marker.projectId);
+            }
+          }
+        }
+
+        if (!targetProject) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(
+              'Nenhum projeto ARIA carregado ou detectado. Abra um arquivo de endpoint pelo painel ARIA primeiro.'
+            )
+          ]);
+        }
+
+        const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+        const currentEndpointId = activeFile ? editMap.get(activeFile)?.id : undefined;
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(buildEndpointsSummary(targetProject, currentEndpointId))
+        ]);
+      }
+    }),
+
+    vscode.lm.registerTool<CreateEndpointInput>('aria_create_endpoint', {
+      prepareInvocation(options, _token) {
+        const { name, path: epPath, projectId, projectName } = options.input;
+        const target = projectId !== undefined ? `ID ${projectId}` : (projectName?.trim() || 'detectado automaticamente');
+        return { invocationMessage: `Criando endpoint "${name}" (${epPath}) no projeto ${target}...` };
+      },
+      async invoke(options, _token) {
+        if (!client) {
+          client = new AriaApiClient(getSettings(), acquireAccessToken);
+        }
+
+        if (!dataset) {
+          try {
+            dataset = await client.getProjectEndpointTree();
+            tree.refresh();
+          } catch (error) {
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(`Nao foi possivel carregar a arvore de projetos automaticamente: ${toErrorMessage(error)}`)
+            ]);
+          }
+        }
+
+        if (!dataset) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Sem conexao ativa com a API ARIA e nao foi possivel carregar a arvore de projetos.')
+          ]);
+        }
+
+        const { name, path: epPath, code, method, description } = options.input;
+
+        if (!name?.trim() || !epPath?.trim()) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Erro: "name" e "path" sao obrigatorios.')
+          ]);
+        }
+
+        const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+        const markerProjectId = activeFile ? editMap.get(activeFile)?.projectId : undefined;
+        const resolved = resolveProjectFromInput(dataset.registros, options.input, markerProjectId);
+        const project = resolved.project;
+        if (!project) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(resolved.error || 'Nao foi possivel identificar o projeto alvo.')
+          ]);
+        }
+
+        const projectId = project.ID_PROJETO;
+
+        const normalizedPath = normalizeEndpointPath(epPath);
+
+        if (project.REST_CUSTOM.some((e) => String(e.TX_PATH || '').toLowerCase() === normalizedPath.toLowerCase())) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`Ja existe endpoint com TX_PATH "${normalizedPath}". Use um path novo para inclusao.`)
+          ]);
+        }
+
+        try {
+          const endpointFormItems = await getEndpointFormItems();
+          const requiredFields = buildRequiredEndpointFieldKeys(endpointFormItems);
+          const lovs = await getProjectLovs(projectId);
+          const endpointValidations = await getEndpointValidations();
+
+          await saveWithFreshDataset(`createEndpoint:agent:${projectId}`, projectId, async (draft) => {
+            const proj = draft.registros.find((p) => p.ID_PROJETO === projectId);
+            if (!proj) { throw new Error('Projeto nao encontrado no draft.'); }
+
+            if (proj.REST_CUSTOM.some((e) => String(e.TX_PATH || '').toLowerCase() === normalizedPath.toLowerCase())) {
+              throw new Error(`Ja existe endpoint com TX_PATH "${normalizedPath}".`);
+            }
+
+            const inferredMethod = inferMethodId(proj, method, lovs);
+            const draftEndpoint = buildEndpointFromExampleStructure(proj, {
+              NO_REST_CUSTOM: name.trim(),
+              TX_PATH: normalizedPath,
+              ...(code !== undefined ? { TX_CODIGO: code } : {}),
+              ID_METODO: inferredMethod,
+              ...(description !== undefined ? { DS_REST_CUSTOM_CURTA: description } : {})
+            });
+
+            if (toNumber(draftEndpoint.ID_BANCO_EXTERNO) <= 0 && lovs?.BANCO_EXTERNO?.length) {
+              draftEndpoint.ID_BANCO_EXTERNO = lovs.BANCO_EXTERNO[0].ID_BANCO_EXTERNO;
+            }
+            if (toNumber(draftEndpoint.ID_TIPO_CODIGO) <= 0 && lovs?.TIPO_CODIGO?.length) {
+              draftEndpoint.ID_TIPO_CODIGO = lovs.TIPO_CODIGO[0].ID_TIPO_CODIGO;
+            }
+            if (toNumber(draftEndpoint.ID_TIPO_HEADER) <= 0 && lovs?.TIPO_HEADER?.length) {
+              draftEndpoint.ID_TIPO_HEADER = lovs.TIPO_HEADER[0].ID_TIPO_HEADER;
+            }
+
+            const newEndpoint = applyLovDisplayValues(draftEndpoint, lovs);
+
+            const missingRequired = requiredFields.filter((fieldName) =>
+              isMissingRequiredField(fieldName, newEndpoint[fieldName])
+            );
+            if (missingRequired.length) {
+              throw new Error(
+                `Campos obrigatorios nao preenchidos para criar endpoint: ${missingRequired.join(', ')}.`
+              );
+            }
+
+            const validationErrors = validateEndpointPayload(newEndpoint, endpointValidations);
+            if (validationErrors.length) {
+              throw new Error(validationErrors.join(' | '));
+            }
+
+            proj.REST_CUSTOM.push(newEndpoint as AriaEndpoint);
+          });
+
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(
+              `Endpoint "${name}" criado com sucesso no projeto "${project.NO_PROJETO}". ` +
+              `Campos de lista foram sincronizados (ID/NO) e defaults de conexao/metodo foram inferidos quando necessario. ` +
+              `A arvore foi atualizada. Use #aria_list_endpoints para ver todos os endpoints do projeto.`
+            )
+          ]);
+        } catch (error) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`Erro ao criar endpoint: ${toErrorMessage(error)}`)
+          ]);
+        }
+      }
+    })
+  );
+
+  // ── Copilot: Chat Participant @aria ──────────────────────────────────────
+  const participant = vscode.chat.createChatParticipant('aria.assistant', async (request, ctx, response, token) => {
+    if (!dataset) {
+      response.markdown('Nenhum projeto ARIA carregado. Use **ARIA: Conectar na API** primeiro.');
+      return;
+    }
+
+    const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const marker = activeFile ? editMap.get(activeFile) : undefined;
+    const projects = dataset.registros;
+
+    // Build context based on active file or first matching project
+    let contextProject: AriaProject | undefined;
+    if (marker) {
+      contextProject = projects.find((p) => p.ID_PROJETO === marker.projectId);
+    }
+
+    // Build system context message
+    const contextLines: string[] = [];
+    if (contextProject) {
+      const currentEndpointId = marker?.type !== 'projectJson' ? marker?.id : undefined;
+      contextLines.push(buildEndpointsSummary(contextProject, currentEndpointId));
+    } else {
+      contextLines.push(`Projetos carregados (${projects.length} total):`);
+      for (const proj of projects.slice(0, 10)) {
+        contextLines.push(`- [ID ${proj.ID_PROJETO}] ${proj.NO_PROJETO} (${proj.TX_PATH}) — ${proj.REST_CUSTOM.length} endpoint(s)`);
+      }
+      if (projects.length > 10) {
+        contextLines.push(`... e mais ${projects.length - 10} projeto(s).`);
+      }
+    }
+
+    const systemContext = contextLines.join('\n');
+    const projectsJsonContext = buildProjectsContextJson(projects);
+
+    // Select model (prefer copilot-gpt-4o family, fallback to any)
+    const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    if (!models.length) {
+      response.markdown('Nenhum modelo de linguagem Copilot disponivel. Verifique se o Copilot esta ativo.');
+      return;
+    }
+
+    const model = models[0];
+
+    const messages: vscode.LanguageModelChatMessage[] = [
+      vscode.LanguageModelChatMessage.User(
+        `Voce e um assistente especializado na plataforma ARIA de APIs. Responda sempre em portugues.\n\nContexto atual:\n\n${systemContext}\n\nArvore de projetos em JSON (fonte da verdade para inferir projeto/id e endpoints):\n\n${projectsJsonContext}`
+      )
+    ];
+
+    // Include conversation history
+    for (const turn of ctx.history) {
+      if (turn instanceof vscode.ChatRequestTurn) {
+        messages.push(vscode.LanguageModelChatMessage.User(turn.prompt));
+      } else if (turn instanceof vscode.ChatResponseTurn) {
+        const text = turn.response
+          .map((r) => (r instanceof vscode.ChatResponseMarkdownPart ? r.value.value : ''))
+          .join('');
+        if (text.trim()) {
+          messages.push(vscode.LanguageModelChatMessage.Assistant(text));
+        }
+      }
+    }
+
+    messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+
+    const chatResponse = await model.sendRequest(messages, {}, token);
+    for await (const fragment of chatResponse.text) {
+      response.markdown(fragment);
+    }
+  });
+
+  participant.iconPath = new vscode.ThemeIcon('server-environment');
+  participant.followupProvider = {
+    provideFollowups(_result, _ctx, _token) {
+      return [
+        { prompt: 'Liste todos os endpoints deste projeto', label: 'Listar endpoints', command: 'listar' },
+        { prompt: 'Quais endpoints deste projeto sao do tipo GET?', label: 'Endpoints GET' },
+        { prompt: 'Crie um novo endpoint GET /exemplo com SELECT 1 FROM dual', label: 'Criar endpoint de exemplo' }
+      ];
+    }
+  };
+
+  context.subscriptions.push(participant);
+
   context.subscriptions.push({
     dispose: () => {
       void client?.close();
@@ -779,6 +1308,137 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
   // encerramento gerenciado no dispose registrado em activate
+}
+
+function buildEndpointFromExampleStructure(project: AriaProject, overrides: Record<string, unknown>): Record<string, unknown> {
+  const projectRecord = project as Record<string, unknown>;
+  const methodFromOverrides = Number(overrides.ID_METODO ?? 1);
+  const methodMap: Record<number, string> = {
+    1: 'GET',
+    2: 'POST',
+    3: 'PUT',
+    4: 'DELETE'
+  };
+
+  // Fill common infra defaults from the project when available, then fallback to safe defaults.
+  const firstEndpoint = project.REST_CUSTOM[0] as Record<string, unknown> | undefined;
+  const coSistema = Number(projectRecord.CO_SISTEMA ?? firstEndpoint?.CO_BANCO_EXTERNO ?? -1);
+  const idBancoExterno = Number(projectRecord.ID_BANCO_EXTERNO ?? firstEndpoint?.ID_BANCO_EXTERNO ?? 0);
+  const coBancoExterno = String(projectRecord.CO_BANCO_EXTERNO ?? firstEndpoint?.CO_BANCO_EXTERNO ?? '');
+
+  const baseStructure: Record<string, unknown> = {
+    ID_REST_CUSTOM: 0,
+    NO_REST_CUSTOM: '',
+    TX_PATH: '',
+    ID_TIPO_CODIGO: 1,
+    NO_TIPO_CODIGO: 'SQL',
+    TX_CODIGO: '',
+    TX_COMENTARIOS: '',
+    ID_PROJETO: project.ID_PROJETO,
+    NR_VERSAO: 1,
+    ID_METODO: Number.isFinite(methodFromOverrides) ? methodFromOverrides : 1,
+    NO_METODO: methodMap[methodFromOverrides] ?? 'GET',
+    TX_MIME_TYPE: 'application/json',
+    ID_TIPO_HEADER: 1,
+    NO_TIPO_HEADER: 'Automatico',
+    NR_PAGE_SIZE: 1000,
+    SN_PAGINADO: 'S',
+    IN_MODO_SEGURANCA: 1,
+    ID_BANCO_EXTERNO: idBancoExterno,
+    CO_BANCO_EXTERNO: coBancoExterno,
+    SN_MODO_COMPATIBILIDADE: 'N',
+    SN_CACHE: 'N',
+    SN_PUBLICADO: 'S',
+    SN_INCLUI_COUNT: 'N',
+    IN_FORMATO_SAIDA: 'json',
+    TX_SEPARADOR_CSV: ',',
+    SN_HABILITA_META_API: 'N',
+    SN_NULOS_EXPLICITOS: 'N',
+    DS_REST_CUSTOM_CURTA: '',
+    SN_IGNORA_CONFIGS_DEPLOY: 'N',
+    SN_APENAS_INTERNO: 'N',
+    SN_EXIGE_OTP: 'N',
+    SN_IDEMPOTENTE: 'N',
+    IN_JANELA_TEMPO_CACHE: 'FH',
+    PROJETO: [
+      {
+        TX_PATH: project.TX_PATH,
+        CO_SISTEMA: coSistema
+      }
+    ],
+    REST_CUSTOM_PERFIL: [],
+    REST_CUSTOM_RESPONSE: [],
+    REST_CUSTOM_JSON_SCHEMA: [],
+    VARIABLE: [],
+    HEADER: [],
+    REST_CUSTOM_IP: [],
+    REST_CUSTOM_TIPO_OTP: [],
+    REST_CUSTOM_ATRIBUTO_LOG: []
+  };
+
+  return {
+    ...baseStructure,
+    ...overrides,
+    ID_REST_CUSTOM: 0,
+    ID_PROJETO: project.ID_PROJETO,
+    PROJETO: [
+      {
+        TX_PATH: project.TX_PATH,
+        CO_SISTEMA: coSistema
+      }
+    ],
+    NO_METODO: methodMap[Number(overrides.ID_METODO ?? methodFromOverrides)] ?? 'GET'
+  };
+}
+
+function buildEndpointsSummary(project: AriaProject, currentEndpointId?: number): string {
+  const lines: string[] = [
+    `## Projeto: ${project.NO_PROJETO}`,
+    `- **ID:** ${project.ID_PROJETO}`,
+    `- **Caminho base:** ${project.TX_PATH}`,
+    `- **Total de endpoints:** ${project.REST_CUSTOM.length}`,
+    '',
+    '### Endpoints do projeto:',
+    ''
+  ];
+
+  const methodNames: Record<number, string> = { 1: 'GET', 2: 'POST', 3: 'PUT', 4: 'DELETE' };
+
+  for (const ep of project.REST_CUSTOM) {
+    const isCurrent = ep.ID_REST_CUSTOM === currentEndpointId;
+    const marker = isCurrent ? ' ← **(endpoint sendo editado)**' : '';
+    const method = typeof ep.ID_METODO === 'number' ? ` [${methodNames[ep.ID_METODO] ?? ep.ID_METODO}]` : '';
+    lines.push(`- **[ID ${ep.ID_REST_CUSTOM}]${method} ${ep.NO_REST_CUSTOM}**${marker}`);
+    lines.push(`  - Caminho: \`${ep.TX_PATH}\``);
+    const desc = ep.DS_REST_CUSTOM_CURTA ?? ep.DS_REST_CUSTOM ?? ep.TX_COMENTARIOS;
+    if (desc && typeof desc === 'string') {
+      lines.push(`  - Descricao: ${desc}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function buildProjectsContextJson(projects: AriaProject[], maxProjects = 60, maxEndpointsPerProject = 80): string {
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    totalProjects: projects.length,
+    projects: projects.slice(0, maxProjects).map((project) => ({
+      id: project.ID_PROJETO,
+      name: project.NO_PROJETO,
+      path: project.TX_PATH,
+      endpointCount: project.REST_CUSTOM.length,
+      endpoints: project.REST_CUSTOM.slice(0, maxEndpointsPerProject).map((endpoint) => ({
+        id: endpoint.ID_REST_CUSTOM,
+        name: endpoint.NO_REST_CUSTOM,
+        path: endpoint.TX_PATH,
+        methodId: toNumber((endpoint as Record<string, unknown>).ID_METODO),
+        methodName: toStringSafe((endpoint as Record<string, unknown>).NO_METODO)
+      }))
+    }))
+  };
+
+  return JSON.stringify(payload, null, 2);
 }
 
 function getSettings(): ApiSettings {
@@ -833,6 +1493,464 @@ function mergePreservingTypes(original: Record<string, unknown>, updates: Record
     result[key] = typeof original[key] === 'number' ? Number(value) : value;
   }
   return result;
+}
+
+function applyLovDisplayValues(payload: Record<string, unknown>, lovs?: AriaLovs): Record<string, unknown> {
+  if (!lovs) {
+    return payload;
+  }
+
+  const normalized = { ...payload };
+
+  const metodoId = toNumber(normalized.ID_METODO);
+  if (metodoId > 0) {
+    const metodo = lovs.METODO?.find((item) => item.ID_METODO === metodoId);
+    if (metodo) {
+      normalized.NO_METODO = metodo.NO_METODO;
+    }
+  }
+
+  const tipoCodigoId = toNumber(normalized.ID_TIPO_CODIGO);
+  if (tipoCodigoId > 0) {
+    const tipoCodigo = lovs.TIPO_CODIGO?.find((item) => item.ID_TIPO_CODIGO === tipoCodigoId);
+    if (tipoCodigo) {
+      normalized.NO_TIPO_CODIGO = tipoCodigo.NO_TIPO_CODIGO;
+    }
+  }
+
+  const tipoHeaderId = toNumber(normalized.ID_TIPO_HEADER);
+  if (tipoHeaderId > 0) {
+    const tipoHeader = lovs.TIPO_HEADER?.find((item) => item.ID_TIPO_HEADER === tipoHeaderId);
+    if (tipoHeader) {
+      normalized.NO_TIPO_HEADER = tipoHeader.NO_TIPO_HEADER;
+    }
+  }
+
+  const bancoId = toNumber(normalized.ID_BANCO_EXTERNO);
+  if (bancoId > 0) {
+    const banco = lovs.BANCO_EXTERNO?.find((item) => item.ID_BANCO_EXTERNO === bancoId);
+    if (banco) {
+      normalized.CO_BANCO_EXTERNO = banco.CO_BANCO_EXTERNO;
+
+      const schemaId = toNumber(normalized.ID_BANCO_ESQUEMA);
+      if (schemaId > 0 && !banco.BANCO_ESQUEMA.some((schema) => schema.ID_BANCO_ESQUEMA === schemaId)) {
+        normalized.ID_BANCO_ESQUEMA = '';
+      }
+    }
+  }
+
+  const instanciaId = toNumber(normalized.ID_INSTANCIA);
+  if (instanciaId > 0) {
+    const instancia = lovs.INSTANCIA?.find((item) => item.ID_INSTANCIA === instanciaId);
+    if (instancia) {
+      normalized.CO_INSTANCIA = instancia.CO_INSTANCIA;
+    }
+  }
+
+  return normalized;
+}
+
+function inferMethodId(project: AriaProject, requestedMethod?: number, lovs?: AriaLovs): number {
+  if (typeof requestedMethod === 'number' && requestedMethod > 0) {
+    return requestedMethod;
+  }
+
+  const projectMethod = project.REST_CUSTOM
+    .map((endpoint) => toNumber((endpoint as Record<string, unknown>).ID_METODO))
+    .find((id) => id > 0);
+  if (projectMethod) {
+    return projectMethod;
+  }
+
+  const lovMethod = lovs?.METODO?.[0]?.ID_METODO;
+  if (typeof lovMethod === 'number' && lovMethod > 0) {
+    return lovMethod;
+  }
+
+  return 1;
+}
+
+function buildRequiredEndpointFieldKeys(items?: EndpointFormItem[]): string[] {
+  if (!items?.length) {
+    return [];
+  }
+
+  const required = items
+    .filter((item) => String(item.IS_REQUIRED || '').trim().toLowerCase() === 'yes')
+    .filter((item) => {
+      const displayAs = String(item.DISPLAY_AS || '').trim().toLowerCase();
+      return displayAs !== 'hidden' && displayAs !== 'display only';
+    })
+    .map((item) => normalizeEndpointFieldKey(item.ITEM_NAME));
+
+  return Array.from(new Set(required));
+}
+
+function isMissingRequiredField(fieldName: string, value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return true;
+  }
+
+  if (typeof value === 'string') {
+    return value.trim().length === 0;
+  }
+
+  if (fieldName.startsWith('ID_')) {
+    return toNumber(value) <= 0;
+  }
+
+  return false;
+}
+
+function validateEndpointPayload(payload: Record<string, unknown>, validations?: EndpointValidationItem[]): string[] {
+  if (!validations?.length) {
+    return [];
+  }
+
+  const sorted = validations
+    .slice()
+    .sort((a, b) => {
+      const regionDiff = a.REGION_SEQUENCE - b.REGION_SEQUENCE;
+      if (regionDiff !== 0) {
+        return regionDiff;
+      }
+      return a.VALIDATION_SEQUENCE - b.VALIDATION_SEQUENCE;
+    });
+
+  const errors: string[] = [];
+  for (const validation of sorted) {
+    if (!shouldApplyValidationCondition(validation, payload)) {
+      continue;
+    }
+
+    const type = (validation.VALIDATION_TYPE || '').toLowerCase();
+    const failMessage = validation.VALIDATION_FAILURE_TEXT?.trim() || `${validation.VALIDATION_NAME} invalida.`;
+
+    if (type.includes('item\\column specified is not null')) {
+      const field = normalizeEndpointFieldKey(validation.VALIDATION_EXPRESSION1 || '');
+      if (field && isMissingRequiredField(field, payload[field])) {
+        errors.push(failMessage);
+      }
+      continue;
+    }
+
+    if (type.includes('pl/sql expression')) {
+      const expression = validation.VALIDATION_EXPRESSION1 || '';
+      const valid = evaluateSimplePlsqlExpression(expression, payload);
+      if (valid === false) {
+        errors.push(failMessage);
+      }
+      continue;
+    }
+
+    if (type.includes('function returning error text')) {
+      const expression = (validation.VALIDATION_EXPRESSION1 || '').toLowerCase();
+      if (expression.includes('import\\s+os')) {
+        const code = toStringSafe(payload.TX_CODIGO).toLowerCase();
+        if (/\bimport\s+os\b/.test(code)) {
+          errors.push(validation.VALIDATION_FAILURE_TEXT?.trim() || 'Nao e permitido importar o modulo os.');
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
+function shouldApplyValidationCondition(validation: EndpointValidationItem, payload: Record<string, unknown>): boolean {
+  const conditionType = (validation.CONDITION_TYPE || '').trim().toLowerCase();
+  if (!conditionType) {
+    return true;
+  }
+
+  if (conditionType === 'never') {
+    return false;
+  }
+
+  if (conditionType.includes('value of item in expression 1 = expression 2')) {
+    const leftKey = normalizeEndpointFieldKey(validation.CONDITION_EXPRESSION1 || '');
+    const rightRaw = toStringSafe(validation.CONDITION_EXPRESSION2 || '').trim();
+    if (!leftKey) {
+      return true;
+    }
+    return toStringSafe(payload[leftKey]).trim() === rightRaw;
+  }
+
+  return true;
+}
+
+function evaluateSimplePlsqlExpression(expression: string, payload: Record<string, unknown>): boolean | undefined {
+  const trimmed = expression.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const tokens = tokenizeSimplePlsqlExpression(trimmed);
+  if (!tokens) {
+    return undefined;
+  }
+
+  let idx = 0;
+
+  const parseValue = (): unknown => {
+    const token = tokens[idx];
+    if (!token) {
+      return undefined;
+    }
+
+    if (token.type === 'item') {
+      idx += 1;
+      return payload[token.value];
+    }
+
+    if (token.type === 'number') {
+      idx += 1;
+      return Number(token.value);
+    }
+
+    if (token.type === 'string') {
+      idx += 1;
+      return token.value;
+    }
+
+    return undefined;
+  };
+
+  const parseComparison = (): boolean | undefined => {
+    const leftToken = tokens[idx];
+    if (!leftToken || leftToken.type !== 'item') {
+      return undefined;
+    }
+    const leftKey = leftToken.value;
+    idx += 1;
+
+    const next = tokens[idx];
+    if (!next) {
+      return undefined;
+    }
+
+    if (next.type === 'word' && next.value === 'is') {
+      idx += 1;
+      const maybeNot = tokens[idx];
+      let isNot = false;
+      if (maybeNot?.type === 'word' && maybeNot.value === 'not') {
+        isNot = true;
+        idx += 1;
+      }
+      const nullToken = tokens[idx];
+      if (!nullToken || nullToken.type !== 'word' || nullToken.value !== 'null') {
+        return undefined;
+      }
+      idx += 1;
+
+      const value = payload[leftKey];
+      const isNull = value === null || value === undefined || String(value).trim() === '';
+      return isNot ? !isNull : isNull;
+    }
+
+    if (next.type === 'symbol' && next.value === '=') {
+      idx += 1;
+      const rightValue = parseValue();
+      const leftValue = payload[leftKey];
+      if (typeof rightValue === 'number') {
+        return toNumber(leftValue) === rightValue;
+      }
+      return toStringSafe(leftValue).trim() === toStringSafe(rightValue).trim();
+    }
+
+    return undefined;
+  };
+
+  const parsePrimary = (): boolean | undefined => {
+    const token = tokens[idx];
+    if (!token) {
+      return undefined;
+    }
+
+    if (token.type === 'symbol' && token.value === '(') {
+      idx += 1;
+      const inner = parseOr();
+      if (tokens[idx]?.type === 'symbol' && tokens[idx]?.value === ')') {
+        idx += 1;
+      }
+      return inner;
+    }
+
+    return parseComparison();
+  };
+
+  const parseAnd = (): boolean | undefined => {
+    let result = parsePrimary();
+    while (tokens[idx]?.type === 'word' && tokens[idx]?.value === 'and') {
+      idx += 1;
+      const right = parsePrimary();
+      if (result === undefined || right === undefined) {
+        return undefined;
+      }
+      result = result && right;
+    }
+    return result;
+  };
+
+  const parseOr = (): boolean | undefined => {
+    let result = parseAnd();
+    while (tokens[idx]?.type === 'word' && tokens[idx]?.value === 'or') {
+      idx += 1;
+      const right = parseAnd();
+      if (result === undefined || right === undefined) {
+        return undefined;
+      }
+      result = result || right;
+    }
+    return result;
+  };
+
+  const parsed = parseOr();
+  if (idx < tokens.length) {
+    return undefined;
+  }
+  return parsed;
+}
+
+type SimpleToken =
+  | { type: 'item'; value: string }
+  | { type: 'word'; value: string }
+  | { type: 'number'; value: string }
+  | { type: 'string'; value: string }
+  | { type: 'symbol'; value: '(' | ')' | '=' };
+
+function tokenizeSimplePlsqlExpression(input: string): SimpleToken[] | undefined {
+  const tokens: SimpleToken[] = [];
+  let index = 0;
+
+  while (index < input.length) {
+    const current = input[index];
+    if (/\s/.test(current)) {
+      index += 1;
+      continue;
+    }
+
+    if (current === '(' || current === ')' || current === '=') {
+      tokens.push({ type: 'symbol', value: current as '(' | ')' | '=' });
+      index += 1;
+      continue;
+    }
+
+    if (current === ':') {
+      let end = index + 1;
+      while (end < input.length && /[A-Za-z0-9_]/.test(input[end])) {
+        end += 1;
+      }
+      const raw = input.slice(index + 1, end);
+      tokens.push({ type: 'item', value: normalizeEndpointFieldKey(raw) });
+      index = end;
+      continue;
+    }
+
+    if (current === '\'') {
+      let end = index + 1;
+      while (end < input.length && input[end] !== '\'') {
+        end += 1;
+      }
+      if (end >= input.length) {
+        return undefined;
+      }
+      tokens.push({ type: 'string', value: input.slice(index + 1, end) });
+      index = end + 1;
+      continue;
+    }
+
+    if (/[0-9]/.test(current)) {
+      let end = index + 1;
+      while (end < input.length && /[0-9]/.test(input[end])) {
+        end += 1;
+      }
+      tokens.push({ type: 'number', value: input.slice(index, end) });
+      index = end;
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(current)) {
+      let end = index + 1;
+      while (end < input.length && /[A-Za-z_]/.test(input[end])) {
+        end += 1;
+      }
+      tokens.push({ type: 'word', value: input.slice(index, end).toLowerCase() });
+      index = end;
+      continue;
+    }
+
+    return undefined;
+  }
+
+  return tokens;
+}
+
+function normalizeTextForLookup(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeEndpointPath(value: unknown): string {
+  const raw = toStringSafe(value).trim();
+  return raw.replace(/^\/+/, '');
+}
+
+function resolveProjectFromInput(
+  projects: AriaProject[],
+  input: { projectId?: number; projectName?: string },
+  markerProjectId?: number
+): { project?: AriaProject; error?: string } {
+  if (typeof input.projectId === 'number') {
+    const byId = projects.find((p) => p.ID_PROJETO === input.projectId);
+    if (!byId) {
+      const ids = projects.map((p) => `${p.ID_PROJETO} (${p.NO_PROJETO})`).join(', ');
+      return { error: `Projeto ID ${input.projectId} nao encontrado. Projetos carregados: ${ids}` };
+    }
+    return { project: byId };
+  }
+
+  const rawName = input.projectName?.trim();
+  if (rawName) {
+    const normalizedName = normalizeTextForLookup(rawName);
+    const exactMatches = projects.filter((p) => normalizeTextForLookup(p.NO_PROJETO) === normalizedName);
+    if (exactMatches.length === 1) {
+      return { project: exactMatches[0] };
+    }
+    if (exactMatches.length > 1) {
+      const names = exactMatches.map((p) => `${p.ID_PROJETO} (${p.NO_PROJETO})`).join(', ');
+      return { error: `Nome de projeto ambiguo "${rawName}". Matches: ${names}` };
+    }
+
+    const containsMatches = projects.filter((p) => normalizeTextForLookup(p.NO_PROJETO).includes(normalizedName));
+    if (containsMatches.length === 1) {
+      return { project: containsMatches[0] };
+    }
+    if (containsMatches.length > 1) {
+      const names = containsMatches.map((p) => `${p.ID_PROJETO} (${p.NO_PROJETO})`).join(', ');
+      return { error: `Nome de projeto ambiguo "${rawName}". Matches: ${names}` };
+    }
+
+    return { error: `Projeto "${rawName}" nao encontrado na arvore de projetos.` };
+  }
+
+  if (typeof markerProjectId === 'number') {
+    const byMarker = projects.find((p) => p.ID_PROJETO === markerProjectId);
+    if (byMarker) {
+      return { project: byMarker };
+    }
+  }
+
+  if (projects.length === 1) {
+    return { project: projects[0] };
+  }
+
+  return {
+    error: 'Informe projectId ou projectName para identificar o projeto alvo.'
+  };
 }
 
 function resolveEndpointCodeExtension(endpoint: AriaEndpoint): 'sql' | 'py' {
@@ -1055,6 +2173,30 @@ function getFieldOptions(key: string): Array<{ value: string; label: string }> |
   return options[key];
 }
 
+function buildLovOptions(key: string, lovs: AriaLovs | undefined): Array<{ value: string; label: string }> | undefined {
+  if (!lovs) {
+    return undefined;
+  }
+
+  if (key === 'ID_METODO' && lovs.METODO?.length) {
+    return lovs.METODO.map((e) => ({ value: String(e.ID_METODO), label: e.NO_METODO }));
+  }
+  if (key === 'ID_TIPO_CODIGO' && lovs.TIPO_CODIGO?.length) {
+    return lovs.TIPO_CODIGO.map((e) => ({ value: String(e.ID_TIPO_CODIGO), label: e.NO_TIPO_CODIGO }));
+  }
+  if (key === 'ID_TIPO_HEADER' && lovs.TIPO_HEADER?.length) {
+    return lovs.TIPO_HEADER.map((e) => ({ value: String(e.ID_TIPO_HEADER), label: e.NO_TIPO_HEADER }));
+  }
+  if (key === 'ID_BANCO_EXTERNO' && lovs.BANCO_EXTERNO?.length) {
+    return lovs.BANCO_EXTERNO.map((e) => ({ value: String(e.ID_BANCO_EXTERNO), label: e.CO_BANCO_EXTERNO }));
+  }
+  if (key === 'ID_INSTANCIA' && lovs.INSTANCIA?.length) {
+    return lovs.INSTANCIA.map((e) => ({ value: String(e.ID_INSTANCIA), label: e.CO_INSTANCIA }));
+  }
+
+  return undefined;
+}
+
 function getSectionMeta(section: 'basic' | 'behavior' | 'security' | 'cache' | 'advanced' | 'metadata'): { title: string; description: string } {
   const sections = {
     basic: {
@@ -1086,9 +2228,101 @@ function getSectionMeta(section: 'basic' | 'behavior' | 'security' | 'cache' | '
   return sections[section];
 }
 
-function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys: string[]): string {
-  const visibleEntries = Object.entries(data)
-    .filter(([key, value]) => !excludeKeys.includes(key) && (typeof value !== 'object' || value === null));
+interface FormRenderOptions {
+  endpointItems?: EndpointFormItem[];
+  lovs?: AriaLovs;
+}
+
+interface EndpointFieldMeta {
+  key: string;
+  label?: string;
+  required: boolean;
+  displayAs: string;
+  region: string;
+  itemSequence: number;
+  regionSequence: number;
+  hidden: boolean;
+  displayOnly: boolean;
+}
+
+function normalizeEndpointFieldKey(itemName: string): string {
+  return itemName.replace(/^P\d+_/, '').trim().toUpperCase();
+}
+
+function buildEndpointFieldMeta(items: EndpointFormItem[]): Map<string, EndpointFieldMeta> {
+  const sorted = items
+    .filter((item) => item.ITEM_NAME && item.ITEM_NAME.trim().length > 0)
+    .slice()
+    .sort((a, b) => {
+      const regionDiff = (a.REGION_SEQUENCE ?? 0) - (b.REGION_SEQUENCE ?? 0);
+      if (regionDiff !== 0) { return regionDiff; }
+      const itemDiff = (a.ITEM_SEQUENCE ?? 0) - (b.ITEM_SEQUENCE ?? 0);
+      if (itemDiff !== 0) { return itemDiff; }
+      return a.ITEM_NAME.localeCompare(b.ITEM_NAME);
+    });
+
+  const map = new Map<string, EndpointFieldMeta>();
+  for (const item of sorted) {
+    const key = normalizeEndpointFieldKey(item.ITEM_NAME);
+    if (!key || map.has(key)) {
+      continue;
+    }
+
+    const displayAs = String(item.DISPLAY_AS || '').trim();
+    const required = String(item.IS_REQUIRED || '').trim().toLowerCase() === 'yes';
+
+    map.set(key, {
+      key,
+      label: item.LABEL?.trim() || undefined,
+      required,
+      displayAs,
+      region: item.REGION?.trim() || 'Outros',
+      itemSequence: item.ITEM_SEQUENCE ?? 0,
+      regionSequence: item.REGION_SEQUENCE ?? 0,
+      hidden: displayAs.toLowerCase() === 'hidden',
+      displayOnly: displayAs.toLowerCase() === 'display only'
+    });
+  }
+
+  return map;
+}
+
+function resolveFieldInputType(displayAs: string): 'text' | 'number' | 'date' {
+  const normalized = displayAs.toLowerCase();
+  if (normalized.includes('number')) {
+    return 'number';
+  }
+  if (normalized.includes('date')) {
+    return 'date';
+  }
+  return 'text';
+}
+
+function shouldRenderTextarea(displayAs: string): boolean {
+  const normalized = displayAs.toLowerCase();
+  return normalized.includes('tinymce') || normalized.includes('textarea');
+}
+
+function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys: string[], options?: FormRenderOptions): string {
+  const endpointMeta = options?.endpointItems?.length ? buildEndpointFieldMeta(options.endpointItems) : undefined;
+
+  const scalarEntries = new Map<string, unknown>(
+    Object.entries(data).filter(([_, value]) => typeof value !== 'object' || value === null)
+  );
+
+  const visibleEntries: Array<[string, unknown]> = endpointMeta
+    ? Array.from(endpointMeta.values())
+      .filter((meta) => !meta.hidden && !excludeKeys.includes(meta.key))
+      .sort((a, b) => {
+        const regionDiff = a.regionSequence - b.regionSequence;
+        if (regionDiff !== 0) { return regionDiff; }
+        const itemDiff = a.itemSequence - b.itemSequence;
+        if (itemDiff !== 0) { return itemDiff; }
+        return a.key.localeCompare(b.key);
+      })
+      .map((meta) => [meta.key, scalarEntries.get(meta.key)])
+    : Object.entries(data)
+      .filter(([key, value]) => !excludeKeys.includes(key) && (typeof value !== 'object' || value === null));
 
   const summaryItems = visibleEntries
     .filter(([key]) => ['NO_PROJETO', 'NO_REST_CUSTOM', 'TX_PATH', 'ID_PROJETO', 'ID_REST_CUSTOM'].includes(key))
@@ -1099,29 +2333,45 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
       </div>`)
     .join('');
 
-  const sectionOrder: Array<'basic' | 'behavior' | 'security' | 'cache' | 'advanced' | 'metadata'> = [
-    'basic',
-    'behavior',
-    'security',
-    'cache',
-    'advanced',
-    'metadata'
-  ];
+  const sectionOrder: string[] = endpointMeta
+    ? (() => {
+        const regionSeqMap = new Map<string, number>();
+        for (const item of endpointMeta.values()) {
+          if (!item.hidden && !regionSeqMap.has(item.region)) {
+            regionSeqMap.set(item.region, item.regionSequence);
+          }
+        }
+        return Array.from(regionSeqMap.entries())
+          .sort((a, b) => {
+            const diff = a[1] - b[1];
+            return diff !== 0 ? diff : a[0].localeCompare(b[0]);
+          })
+          .map(([region]) => region);
+      })()
+    : ['basic', 'behavior', 'security', 'cache', 'advanced', 'metadata'];
 
-  const sectionFields = new Map<typeof sectionOrder[number], string[]>();
+  const sectionFields = new Map<string, string[]>();
   for (const section of sectionOrder) {
     sectionFields.set(section, []);
   }
 
   for (const [key, value] of visibleEntries) {
+    const meta = endpointMeta?.get(key.toUpperCase());
     const strVal = value === null || value === undefined ? '' : String(value);
-    const label = prettifyLabel(key);
-    const options = getFieldOptions(key);
-    const isBoolean = /^SN_/.test(key) && (strVal === 'S' || strVal === 'N');
-    const isReadonly = /^ID_/.test(key) || key === 'TX_URL';
+    const label = meta?.label || prettifyLabel(key);
+    const fieldOptions = buildLovOptions(key, options?.lovs) ?? getFieldOptions(key);
+    const isBancoEsquema = key === 'ID_BANCO_ESQUEMA' && Boolean(options?.lovs?.BANCO_EXTERNO?.length);
+    const hasLovOptions = Boolean(fieldOptions) || isBancoEsquema;
+    const isBoolean = meta
+      ? meta.displayAs.toLowerCase().includes('checkbox') || ((strVal === 'S' || strVal === 'N') && /^SN_/.test(key))
+      : /^SN_/.test(key) && (strVal === 'S' || strVal === 'N');
+    const isReadonly = Boolean(meta?.displayOnly) || ((/^ID_/.test(key) || key === 'TX_URL') && !hasLovOptions);
     const isCode = key === 'TX_CODIGO' || key === 'TX_SCRIPT_CUSTOM';
-    const isLong = isCode || strVal.length > 120 || /^DS_|^TX_COMENTARIOS|^TX_PERFIS|^TX_IPS|^TX_SECRET_META_API/.test(key);
-    const section = getFieldSection(key);
+    const isLong = isCode || shouldRenderTextarea(meta?.displayAs || '') || strVal.length > 120 || /^DS_|^TX_COMENTARIOS|^TX_PERFIS|^TX_IPS|^TX_SECRET_META_API/.test(key);
+    const section = meta?.region || getFieldSection(key);
+    const requiredAttr = meta?.required && !isReadonly && !isBoolean ? ' required' : '';
+    const renderedLabel = meta?.required ? `${label} *` : label;
+    const inputType = resolveFieldInputType(meta?.displayAs || '');
 
     let control = '';
     if (isBoolean) {
@@ -1131,30 +2381,46 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
         <label class="toggle" for="${escHtml(key)}">
           <input id="${escHtml(key)}" name="${escHtml(key)}" type="checkbox" value="S"${checked} />
           <span class="toggle-track" aria-hidden="true"></span>
-          <span class="toggle-text">${escHtml(label)}</span>
+          <span class="toggle-text">${escHtml(renderedLabel)}</span>
         </label>`;
-    } else if (options) {
-      const renderedOptions = options
+    } else if (fieldOptions) {
+      const renderedOptions = fieldOptions
         .map((option) => {
           const selected = option.value === strVal ? ' selected' : '';
           return `<option value="${escHtml(option.value)}"${selected}>${escHtml(option.label)}</option>`;
         })
         .join('');
+      const onChangeCascade = key === 'ID_BANCO_EXTERNO' ? ' onchange="ariaUpdateBancoEsquema(this.value)"' : '';
       control = `
-        <label for="${escHtml(key)}">${escHtml(label)}</label>
-        <select id="${escHtml(key)}" name="${escHtml(key)}">${renderedOptions}</select>`;
+        <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+        <select id="${escHtml(key)}" name="${escHtml(key)}"${requiredAttr}${onChangeCascade}>${renderedOptions}</select>`;
+    } else if (isBancoEsquema) {
+      const currentBancoId = String(data['ID_BANCO_EXTERNO'] ?? '');
+      const bancosData: AriaBancoExterno[] = options?.lovs?.BANCO_EXTERNO ?? [];
+      const currentBanco = bancosData.find((b) => String(b.ID_BANCO_EXTERNO) === currentBancoId);
+      const schemas = currentBanco?.BANCO_ESQUEMA ?? [];
+      const renderedOptions = [
+        '<option value="">Selecione</option>',
+        ...schemas.map((s) => {
+          const selected = String(s.ID_BANCO_ESQUEMA) === strVal ? ' selected' : '';
+          return `<option value="${escHtml(String(s.ID_BANCO_ESQUEMA))}"${selected}>${escHtml(s.NO_ESQUEMA)}</option>`;
+        })
+      ].join('');
+      control = `
+        <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+        <select id="${escHtml(key)}" name="${escHtml(key)}" data-cascades-from="ID_BANCO_EXTERNO"${requiredAttr}>${renderedOptions}</select>`;
     } else if (isCode) {
       control = `
-        <label for="${escHtml(key)}">${escHtml(label)}</label>
-        <textarea id="${escHtml(key)}" name="${escHtml(key)}" class="code-area" rows="18">${escHtml(strVal)}</textarea>`;
+        <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+        <textarea id="${escHtml(key)}" name="${escHtml(key)}" class="code-area" rows="18"${requiredAttr}>${escHtml(strVal)}</textarea>`;
     } else if (isLong) {
       control = `
-        <label for="${escHtml(key)}">${escHtml(label)}</label>
-        <textarea id="${escHtml(key)}" name="${escHtml(key)}" rows="5"${isReadonly ? ' readonly' : ''}>${escHtml(strVal)}</textarea>`;
+        <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+        <textarea id="${escHtml(key)}" name="${escHtml(key)}" rows="5"${isReadonly ? ' readonly' : ''}${requiredAttr}>${escHtml(strVal)}</textarea>`;
     } else {
       control = `
-        <label for="${escHtml(key)}">${escHtml(label)}</label>
-        <input id="${escHtml(key)}" name="${escHtml(key)}" type="text" value="${escHtml(strVal)}"${isReadonly ? ' readonly' : ''} />`;
+        <label for="${escHtml(key)}">${escHtml(renderedLabel)}</label>
+        <input id="${escHtml(key)}" name="${escHtml(key)}" type="${inputType}" value="${escHtml(strVal)}"${isReadonly ? ' readonly' : ''}${requiredAttr} />`;
     }
 
     const widthClass = isCode || key === 'TX_URL' || key === 'TX_COMENTARIOS' ? 'field span-2' : 'field';
@@ -1168,7 +2434,12 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
         return '';
       }
 
-      const meta = getSectionMeta(section);
+      const meta = endpointMeta
+        ? {
+          title: section,
+          description: 'Agrupamento conforme metadata da tela APEX do endpoint.'
+        }
+        : getSectionMeta(section as 'basic' | 'behavior' | 'security' | 'cache' | 'advanced' | 'metadata');
       return `
         <section class="panel-card">
           <div class="panel-head">
@@ -1184,6 +2455,10 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
         </section>`;
     })
     .join('\n');
+
+  const bancoExternoJson = options?.lovs?.BANCO_EXTERNO?.length
+    ? JSON.stringify(options.lovs.BANCO_EXTERNO)
+    : undefined;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -1437,7 +2712,7 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
           <p class="eyebrow">Editor visual do JSON</p>
           <h1>${escHtml(title)}</h1>
         </div>
-        <p>Os campos foram reorganizados em secoes para ficar mais proximo da experiencia de cadastro do APEX, sem alterar o formato salvo pela API.</p>
+        <p>${endpointMeta ? 'Campos e obrigatoriedade carregados dinamicamente do endpoint items-apex-endpoint.' : 'Os campos foram reorganizados em secoes para ficar mais proximo da experiencia de cadastro do APEX, sem alterar o formato salvo pela API.'}</p>
       </div>
       <div class="summary-grid">${summaryItems}</div>
     </section>
@@ -1455,6 +2730,26 @@ function buildFormHtml(title: string, data: Record<string, unknown>, excludeKeys
 const vscode = acquireVsCodeApi();
 const form = document.getElementById('form');
 const status = document.getElementById('status');
+
+${bancoExternoJson ? `
+var ariaBancoExternoData = ${bancoExternoJson};
+function ariaUpdateBancoEsquema(bancoId) {
+  var sel = document.getElementById('ID_BANCO_ESQUEMA');
+  if (!sel) { return; }
+  var currentVal = sel.value;
+  sel.innerHTML = '<option value="">Selecione</option>';
+  var banco = ariaBancoExternoData.find(function(b) { return String(b.ID_BANCO_EXTERNO) === String(bancoId); });
+  if (banco && banco.BANCO_ESQUEMA) {
+    banco.BANCO_ESQUEMA.forEach(function(s) {
+      var opt = document.createElement('option');
+      opt.value = String(s.ID_BANCO_ESQUEMA);
+      opt.textContent = s.NO_ESQUEMA;
+      if (String(s.ID_BANCO_ESQUEMA) === currentVal) { opt.selected = true; }
+      sel.appendChild(opt);
+    });
+  }
+}
+` : 'function ariaUpdateBancoEsquema() {}'}
 
 form.addEventListener('submit', function(e) {
   e.preventDefault();
@@ -1488,6 +2783,7 @@ function openFormWebview(
   title: string,
   data: Record<string, unknown>,
   excludeKeys: string[],
+  renderOptions: FormRenderOptions | undefined,
   onSave: (updated: Record<string, unknown>) => Promise<void>
 ): void {
   const panel = vscode.window.createWebviewPanel(
@@ -1497,7 +2793,7 @@ function openFormWebview(
     { enableScripts: true, retainContextWhenHidden: true }
   );
 
-  panel.webview.html = buildFormHtml(title, data, excludeKeys);
+  panel.webview.html = buildFormHtml(title, data, excludeKeys, renderOptions);
 
   panel.webview.onDidReceiveMessage(
     async (message: { command: string; data: Record<string, unknown> }) => {
