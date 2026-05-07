@@ -98,6 +98,8 @@ type AccessTokenProvider = (forceRefresh?: boolean) => Promise<string | undefine
 
 type AriaNode = ProjectNode | EndpointNode;
 
+type CodeTypeLabel = 'SQL' | 'PLSQL' | 'PYTHON';
+
 type EditMarker =
   | { type: 'projectJson'; id: number; projectId: number }
   | { type: 'endpointJson'; id: number; projectId: number }
@@ -426,6 +428,117 @@ function toStringSafe(value: unknown): string {
     return '';
   }
   return String(value);
+}
+
+function normalizeCodeTypeToken(value: unknown): string {
+  return toStringSafe(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function normalizeCodeTypeLabel(value: unknown): CodeTypeLabel | undefined {
+  const token = normalizeCodeTypeToken(value);
+  if (!token) {
+    return undefined;
+  }
+
+  if (token.includes('python') || token.includes('jython') || token === 'py') {
+    return 'PYTHON';
+  }
+
+  if (token.includes('plsql') || token.includes('proceduralsql')) {
+    return 'PLSQL';
+  }
+
+  if (token.includes('sql')) {
+    return 'SQL';
+  }
+
+  return undefined;
+}
+
+function inferCodeTypeLabelFromCode(code: string): CodeTypeLabel {
+  const normalized = code.trim().toLowerCase();
+  if (!normalized) {
+    return 'SQL';
+  }
+
+  if (
+    (normalized.startsWith('#!') && normalized.includes('python')) ||
+    /\b(import|from|def|class|lambda|self)\b/.test(normalized)
+  ) {
+    return 'PYTHON';
+  }
+
+  if (
+    /\b(declare|begin|exception|procedure|function|package|cursor|loop|elsif|pragma)\b/.test(normalized) ||
+    /:=/.test(normalized) ||
+    /\bend;\s*$/.test(normalized)
+  ) {
+    return 'PLSQL';
+  }
+
+  return 'SQL';
+}
+
+function formatCodeTypeLabel(label: CodeTypeLabel): string {
+  if (label === 'PYTHON') {
+    return 'Python';
+  }
+
+  if (label === 'PLSQL') {
+    return 'PL/SQL';
+  }
+
+  return 'SQL';
+}
+
+function resolveCodeTypeSelection(
+  lovs: AriaLovs | undefined,
+  input: { codeType?: unknown; code?: string }
+): { id: number; label: CodeTypeLabel; displayName: string } {
+  const explicitLabel = normalizeCodeTypeLabel(input.codeType);
+  const inferredLabel = explicitLabel ?? inferCodeTypeLabelFromCode(input.code || '');
+  const fallbackIds: Record<CodeTypeLabel, number> = {
+    SQL: 1,
+    PLSQL: 2,
+    PYTHON: 3
+  };
+
+  const typeRows = lovs?.TIPO_CODIGO ?? [];
+  for (const row of typeRows) {
+    const rowLabel = normalizeCodeTypeLabel(row.NO_TIPO_CODIGO);
+    if (rowLabel === inferredLabel) {
+      return {
+        id: row.ID_TIPO_CODIGO,
+        label: inferredLabel,
+        displayName: row.NO_TIPO_CODIGO
+      };
+    }
+  }
+
+  const fallbackRow =
+    typeRows.find((row) => {
+      const rowToken = normalizeCodeTypeToken(row.NO_TIPO_CODIGO);
+      if (inferredLabel === 'PYTHON') {
+        return rowToken.includes('python') || rowToken.includes('jython') || rowToken === 'py';
+      }
+
+      if (inferredLabel === 'PLSQL') {
+        return rowToken.includes('plsql') || rowToken.includes('proceduralsql') || rowToken === 'plsql';
+      }
+
+      return rowToken === 'sql';
+    }) || typeRows[0];
+
+  return {
+    id: fallbackRow?.ID_TIPO_CODIGO ?? fallbackIds[inferredLabel],
+    label: inferredLabel,
+    displayName: fallbackRow?.NO_TIPO_CODIGO ?? formatCodeTypeLabel(inferredLabel)
+  };
 }
 
 class ProjectNode extends vscode.TreeItem {
@@ -1194,6 +1307,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // ── Copilot: Language Model Tool ─────────────────────────────────────────
   interface ListEndpointsInput {
     projectId?: number;
+    includeProjectJson?: boolean;
+    includeCode?: boolean;
+    maxCodeChars?: number;
   }
 
   interface CreateEndpointInput {
@@ -1202,6 +1318,7 @@ export function activate(context: vscode.ExtensionContext): void {
     name: string;
     path: string;
     code?: string;
+    codeType?: string;
     method?: number;
     description?: string;
   }
@@ -1235,10 +1352,35 @@ export function activate(context: vscode.ExtensionContext): void {
           ]);
         }
 
+        let detailedProject = targetProject;
+        try {
+          detailedProject = await getProjectDetails(targetProject.ID_PROJETO);
+        } catch {
+          // fallback para o cache local caso a carga detalhada falhe
+        }
+
         const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
         const currentEndpointId = activeFile ? editMap.get(activeFile)?.id : undefined;
+
+        const includeProjectJson = options.input.includeProjectJson !== false;
+        const includeCode = options.input.includeCode !== false;
+        const maxCodeChars = Math.max(200, toNumber(options.input.maxCodeChars) || 6000);
+
+        const parts: string[] = [buildEndpointsSummary(detailedProject, currentEndpointId)];
+        if (includeProjectJson) {
+          const projectJson = buildProjectReferenceJson(detailedProject, {
+            includeCode,
+            maxCodeChars
+          });
+          parts.push('');
+          parts.push('### JSON de referencia do projeto');
+          parts.push('```json');
+          parts.push(projectJson);
+          parts.push('```');
+        }
+
         return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(buildEndpointsSummary(targetProject, currentEndpointId))
+          new vscode.LanguageModelTextPart(parts.join('\n'))
         ]);
       }
     }),
@@ -1271,7 +1413,7 @@ export function activate(context: vscode.ExtensionContext): void {
           ]);
         }
 
-        const { name, path: epPath, code, method, description } = options.input;
+        const { name, path: epPath, code, codeType, method, description } = options.input;
 
         if (!name?.trim() || !epPath?.trim()) {
           return new vscode.LanguageModelToolResult([
@@ -1304,6 +1446,7 @@ export function activate(context: vscode.ExtensionContext): void {
           const requiredFields = buildRequiredEndpointFieldKeys(endpointFormItems);
           const lovs = await getProjectLovs(projectId);
           const endpointValidations = await getEndpointValidations();
+          const codeTypeSelection = resolveCodeTypeSelection(lovs, { codeType, code });
 
           await saveWithFreshDataset(`createEndpoint:agent:${projectId}`, projectId, async (draft) => {
             const proj = draft.registros.find((p) => p.ID_PROJETO === projectId);
@@ -1318,6 +1461,8 @@ export function activate(context: vscode.ExtensionContext): void {
               NO_REST_CUSTOM: name.trim(),
               TX_PATH: normalizedPath,
               ...(code !== undefined ? { TX_CODIGO: code } : {}),
+              ID_TIPO_CODIGO: codeTypeSelection.id,
+              NO_TIPO_CODIGO: codeTypeSelection.displayName,
               ID_METODO: inferredMethod,
               ...(description !== undefined ? { DS_REST_CUSTOM_CURTA: description } : {})
             });
@@ -1354,7 +1499,8 @@ export function activate(context: vscode.ExtensionContext): void {
           return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(
               `Endpoint "${name}" criado com sucesso no projeto "${project.NO_PROJETO}". ` +
-              `Campos de lista foram sincronizados (ID/NO) e defaults de conexao/metodo foram inferidos quando necessario. ` +
+                `Campos de lista foram sincronizados (ID/NO) e o tipo de codigo foi definido como ${codeTypeSelection.displayName}. ` +
+                `Defaults de conexao/metodo foram inferidos quando necessario. ` +
               `A arvore foi atualizada. Use #aria_list_endpoints para ver todos os endpoints do projeto.`
             )
           ]);
@@ -1628,6 +1774,47 @@ function buildProjectsContextJson(projects: AriaProject[], maxProjects = 60, max
   return JSON.stringify(payload, null, 2);
 }
 
+function buildProjectReferenceJson(
+  project: AriaProject,
+  options?: { includeCode?: boolean; maxCodeChars?: number; maxEndpoints?: number }
+): string {
+  const includeCode = options?.includeCode !== false;
+  const maxCodeChars = Math.max(200, options?.maxCodeChars ?? 6000);
+  const maxEndpoints = Math.max(1, options?.maxEndpoints ?? 150);
+
+  const restCustom = project.REST_CUSTOM.slice(0, maxEndpoints).map((endpoint) => {
+    const row = endpoint as Record<string, unknown>;
+    const payload: Record<string, unknown> = {
+      ID_REST_CUSTOM: endpoint.ID_REST_CUSTOM,
+      NO_REST_CUSTOM: endpoint.NO_REST_CUSTOM,
+      TX_PATH: endpoint.TX_PATH,
+      ID_METODO: toNumber(row.ID_METODO),
+      NO_METODO: toStringSafe(row.NO_METODO),
+      ID_TIPO_CODIGO: toNumber(row.ID_TIPO_CODIGO),
+      NO_TIPO_CODIGO: toStringSafe(row.NO_TIPO_CODIGO),
+      DS_REST_CUSTOM_CURTA: toStringSafe(row.DS_REST_CUSTOM_CURTA)
+    };
+
+    if (includeCode) {
+      const fullCode = toStringSafe(row.TX_CODIGO);
+      payload.TX_CODIGO = fullCode.length > maxCodeChars ? `${fullCode.slice(0, maxCodeChars)}\n/* ...truncado... */` : fullCode;
+    }
+
+    return payload;
+  });
+
+  return JSON.stringify(
+    {
+      ID_PROJETO: project.ID_PROJETO,
+      NO_PROJETO: project.NO_PROJETO,
+      TX_PATH: project.TX_PATH,
+      REST_CUSTOM: restCustom
+    },
+    null,
+    2
+  );
+}
+
 function getSettings(): ApiSettings {
   const config = vscode.workspace.getConfiguration('ariaApi');
   return {
@@ -1645,6 +1832,15 @@ function getEntraSettings(): EntraSettings {
       .map((item) => item.trim())
       .filter((item) => item.length > 0)
   };
+}
+
+function ensureTrailingSlash(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error('URL base da API nao informada. Configure ariaApi.baseUrl.');
+  }
+
+  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
 }
 
 function decodeJwtClaims(token: string): Record<string, unknown> | undefined {
@@ -2386,7 +2582,9 @@ function getFieldOptions(key: string): Array<{ value: string; label: string }> |
       { value: '4', label: 'DELETE' }
     ],
     ID_TIPO_CODIGO: [
-      { value: '1', label: 'SQL' }
+      { value: '1', label: 'SQL' },
+      { value: '2', label: 'PL/SQL' },
+      { value: '3', label: 'Python' }
     ],
     IN_TIPO_TRANSFORMACAO: [
       { value: '', label: 'Sem transformacao' },
@@ -3204,7 +3402,10 @@ function openFormWebview(
             p_id_banco_esquema: message.data.ID_BANCO_ESQUEMA,
             p_tx_codigo: toStringSafe(message.data.TX_CODIGO)
           };
-          const url = 'https://ms-aria.appsdev.ocp.tesouro.gov.br/v1/aria-vscode/custom/valida-codigo';
+          const url = new URL(
+            'v1/aria-vscode/custom/valida-codigo',
+            ensureTrailingSlash(getSettings().baseUrl)
+          ).toString();
           const res = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
