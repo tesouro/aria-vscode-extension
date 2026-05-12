@@ -207,165 +207,96 @@
     ],
     "languageModelTools": [
       {
-        "name": "aria_listar_projetos",
-        "displayName": "ARIA: Listar Projetos e Endpoints",
-        "modelDescription": "Lista todos os projetos e endpoints disponíveis no ARIA, com seus IDs, nomes, caminhos (TX_PATH) e configurações de banco de dados (ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA). Use esta ferramenta primeiro para descobrir quais projetos e endpoints existem e quais IDs usar nas demais ferramentas.",
+        "name": "aria_obter_projetos",
+        "displayName": "ARIA: Obter Projetos e Endpoints",
+        "modelDescription": "Retorna todos os projetos e endpoints disponíveis no ARIA (de /projetos-endpoints), com IDs, nomes e caminhos. Use para identificar o ID do projeto pelo nome. Chame quando precisar descobrir qual projeto o usuário mencionou.",
         "inputSchema": {
           "type": "object",
           "properties": {}
         }
       },
       {
-        "name": "aria_obter_template_endpoint",
-        "displayName": "ARIA: Template de Endpoint para Criação",
-        "modelDescription": "Retorna um endpoint existente do projeto como template JSON pronto para ser usado como base para criar um novo endpoint. O template já vem com todos os campos necessários (ID_TIPO_CODIGO, ID_METODO, ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, IN_MODO_SEGURANCA, IN_FORMATO_SAIDA, SN_PAGINADO, etc.) mas sem os campos de identidade (ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO). SEMPRE chame esta ferramenta antes de aria_criar_endpoint para garantir que todos os campos obrigatórios da API sejam incluídos.",
+        "name": "aria_obter_lovs",
+        "displayName": "ARIA: Obter LOVs do Projeto",
+        "modelDescription": "Retorna os valores válidos (LOVs) para os campos do projeto: métodos HTTP (ID_METODO), tipos de código (ID_TIPO_CODIGO), tipos de header, bancos externos (ID_BANCO_EXTERNO com seus esquemas em BANCO_ESQUEMA[]), perfis de acesso, tipos de OTP, etc. Use para saber quais valores preencher nos campos do endpoint.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "id_projeto": {
               "type": "number",
-              "description": "ID do projeto ARIA (ID_PROJETO) do qual extrair um endpoint como template."
+              "description": "ID do projeto ARIA (ID_PROJETO)."
             }
           },
           "required": ["id_projeto"]
         }
       },
       {
-        "name": "aria_obter_endpoints_projeto",
-        "displayName": "ARIA: Endpoints de um Projeto",
-        "modelDescription": "Retorna a lista completa de endpoints de um projeto ARIA específico, com todos os campos de cada endpoint (exceto TX_CODIGO). Use para entender o contexto do projeto antes de editar ou criar endpoints.",
+        "name": "aria_obter_json_projeto",
+        "displayName": "ARIA: Obter JSON Completo do Projeto",
+        "modelDescription": "Retorna o JSON completo do projeto via /gerar-json, incluindo todos os endpoints com seus campos detalhados (TX_CODIGO, configurações de banco, segurança, etc.). O campo REST_CUSTOM_JSON_SCHEMA é removido automaticamente antes de chegar ao modelo. Use para entender os endpoints existentes e copiar configurações de banco/esquema.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "id_projeto": {
               "type": "number",
-              "description": "ID do projeto ARIA (ID_PROJETO). Use aria_listar_projetos para descobrir os IDs."
+              "description": "ID do projeto ARIA (ID_PROJETO)."
             }
           },
           "required": ["id_projeto"]
         }
       },
       {
-        "name": "aria_obter_detalhes_endpoint",
-        "displayName": "ARIA: Detalhes de um Endpoint",
-        "modelDescription": "Retorna todos os campos de um endpoint ARIA, incluindo o código SQL ou Python completo (TX_CODIGO), configurações de banco de dados, segurança, cache e demais propriedades. Use quando precisar ver ou entender o conteúdo completo de um endpoint específico.",
+        "name": "aria_obter_itens_apex",
+        "displayName": "ARIA: Obter Itens Apex do Formulário",
+        "modelDescription": "Retorna os itens do formulário APEX do endpoint (de /items-apex-endpoint), incluindo quais campos são obrigatórios (IS_REQUIRED), o tipo de exibição e a sequência. Use para saber quais campos são obrigatórios ao criar ou editar um endpoint.",
         "inputSchema": {
           "type": "object",
-          "properties": {
-            "id_endpoint": {
-              "type": "number",
-              "description": "ID do endpoint ARIA (ID_REST_CUSTOM). Use aria_listar_projetos para descobrir os IDs disponíveis."
-            }
-          },
-          "required": ["id_endpoint"]
+          "properties": {}
         }
       },
       {
-        "name": "aria_obter_metadados_banco",
-        "displayName": "ARIA: Metadados do Banco de Dados",
-        "modelDescription": "Retorna a lista de schemas e tabelas disponíveis no banco associado ao endpoint e salva o catálogo completo como referência no chat. Não retorna colunas — use aria_obter_colunas_tabela para isso. Se o catálogo for grande, informe o parâmetro opcional esquemas para filtrar a resposta e reduzir tokens (o arquivo completo continua sendo salvo e referenciado).",
+        "name": "aria_obter_metadados",
+        "displayName": "ARIA: Obter Metadados do Banco",
+        "modelDescription": "Retorna o catálogo de tabelas e colunas do banco de dados (de /obtem-metadados), salva em arquivo e referencia no chat. Use para descobrir tabelas e colunas reais antes de escrever SQL. NUNCA invente tabelas ou colunas — use sempre os metadados reais.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "id_endpoint": {
+            "p_id_banco_externo": {
               "type": "number",
-              "description": "ID do endpoint ARIA (ID_REST_CUSTOM) cujo banco de dados deve ser consultado."
+              "description": "ID do banco externo (ID_BANCO_EXTERNO), obtido nas LOVs."
             },
-            "esquemas": {
+            "p_id_banco_esquema": {
+              "type": "number",
+              "description": "Opcional. ID do esquema do banco (ID_BANCO_ESQUEMA), obtido nas LOVs dentro de BANCO_EXTERNO[].BANCO_ESQUEMA[]."
+            },
+            "schema_preferido": {
+              "type": "string",
+              "description": "Opcional. Schema preferido para ranquear tabelas no retorno (ex: COSIS_MICRO)."
+            },
+            "termos_busca": {
               "type": "array",
-              "description": "Opcional: lista de esquemas para filtrar a resposta de tabelas e reduzir tokens (ex: [\"COSIS_SERIES_TEMPORAIS\", \"OUTRO_SCHEMA\"]).",
+              "description": "Opcional. Termos para ranquear as tabelas mais relevantes ao pedido do usuario (ex: [\"metodo\", \"metodos\"]).",
               "items": {
                 "type": "string"
               }
             }
           },
-          "required": ["id_endpoint"]
+          "required": ["p_id_banco_externo"]
         }
       },
       {
-        "name": "aria_obter_colunas_tabela",
-        "displayName": "ARIA: Colunas de uma Tabela",
-        "modelDescription": "Retorna as colunas (nome, tipo e descrição) de uma tabela específica do banco de dados, lendo do catálogo já salvo por aria_obter_metadados_banco. Chame esta tool apenas para as tabelas que você realmente vai referenciar na query SQL. Informe o nome da tabela no formato SCHEMA.TABELA (ex: CODIN_AVISOS.AVISO) ou apenas TABELA se o schema for óbvio pelo contexto.",
+        "name": "aria_importar_json",
+        "displayName": "ARIA: Importar JSON do Projeto",
+        "modelDescription": "Salva um projeto ARIA via /importar-json. Use para criar ou editar endpoints. O json_projeto deve ter a estrutura { 'registros': [{ ...projeto..., REST_CUSTOM: [<apenas o endpoint novo ou editado>] }] }. ID_REST_CUSTOM deve ser 0 para endpoints novos. CONFIRME com o usuário antes de chamar esta ferramenta.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "id_endpoint": {
-              "type": "number",
-              "description": "ID do endpoint ARIA (ID_REST_CUSTOM) cujo banco de dados foi consultado com aria_obter_metadados_banco."
-            },
-            "tabela": {
-              "type": "string",
-              "description": "Nome da tabela no formato SCHEMA.TABELA (ex: CODIN_AVISOS.AVISO) ou apenas TABELA. Use o nome exato retornado por aria_obter_metadados_banco."
-            }
-          },
-          "required": ["id_endpoint", "tabela"]
-        }
-      },
-      {
-        "name": "aria_editar_codigo_endpoint",
-        "displayName": "ARIA: Editar Código de Endpoint",
-        "modelDescription": "Substitui o código SQL ou Python (TX_CODIGO) de um endpoint ARIA pelo novo código fornecido e salva imediatamente via API. Use quando o usuário quiser modificar a query ou script de um endpoint existente. Confirme com o usuário antes de salvar.",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "id_endpoint": {
-              "type": "number",
-              "description": "ID do endpoint ARIA (ID_REST_CUSTOM) a editar."
-            },
-            "novo_codigo": {
-              "type": "string",
-              "description": "Novo código SQL ou Python completo que substituirá o TX_CODIGO atual do endpoint."
-            }
-          },
-          "required": ["id_endpoint", "novo_codigo"]
-        }
-      },
-      {
-        "name": "aria_editar_campos_endpoint",
-        "displayName": "ARIA: Editar Campos de Endpoint",
-        "modelDescription": "Atualiza campos de configuração de um endpoint ARIA (exceto TX_CODIGO). Exemplos de campos editáveis: NO_REST_CUSTOM, TX_PATH, ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, IN_MODO_SEGURANCA, SN_PAGINADO, NR_PAGE_SIZE, SN_CACHE, NR_TEMPO_CACHE, DS_REST_CUSTOM_CURTA. Não use para editar o código; use aria_editar_codigo_endpoint para isso. Confirme com o usuário antes de salvar.",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "id_endpoint": {
-              "type": "number",
-              "description": "ID do endpoint ARIA (ID_REST_CUSTOM) a editar."
-            },
-            "campos": {
+            "json_projeto": {
               "type": "object",
-              "description": "Objeto com os campos e valores a atualizar no endpoint. Inclua apenas os campos que devem mudar.",
-              "additionalProperties": true
+              "description": "Objeto com a estrutura { 'registros': [{ ...dadosDoProjeto..., REST_CUSTOM: [<endpoint>] }] }."
             }
           },
-          "required": ["id_endpoint", "campos"]
-        }
-      },
-      {
-        "name": "aria_criar_endpoint",
-        "displayName": "ARIA: Criar Novo Endpoint",
-        "modelDescription": "Cria um novo endpoint REST em um projeto ARIA. WORKFLOW OBRIGATÓRIO antes de chamar esta ferramenta: (1) chame aria_obter_template_endpoint para obter todos os campos de configuração do projeto como base; (2) chame aria_obter_metadados_banco em um endpoint existente do mesmo projeto para conhecer as tabelas e colunas disponíveis; (3) escreva o TX_CODIGO (SQL ou Python) completo e funcional com base nos metadados reais; (4) monte o objeto 'campos' copiando TODOS os campos do template e substituindo apenas NO_REST_CUSTOM, TX_PATH e TX_CODIGO. Campos críticos que DEVEM estar presentes: NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_TIPO_CODIGO (1=SQL, 3=Python), ID_METODO (1=GET, 2=POST), ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, IN_MODO_SEGURANCA, IN_FORMATO_SAIDA, SN_PAGINADO, SN_NULOS_EXPLICITOS, SN_PUBLICADO. Não invente valores — copie do template e altere só o necessário.",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "id_projeto": {
-              "type": "number",
-              "description": "ID do projeto ARIA (ID_PROJETO) onde o endpoint será criado."
-            },
-            "campos": {
-              "type": "object",
-              "description": "Objeto completo com TODOS os campos do novo endpoint, baseado no template de aria_obter_template_endpoint.",
-              "properties": {
-                "NO_REST_CUSTOM": { "type": "string", "description": "Nome descritivo do endpoint." },
-                "TX_PATH": { "type": "string", "description": "Caminho URL do endpoint, ex: /meu-endpoint." },
-                "TX_CODIGO": { "type": "string", "description": "Código SQL ou Python completo e funcional." },
-                "ID_TIPO_CODIGO": { "type": "number", "description": "1 para SQL, 3 para Python." },
-                "ID_METODO": { "type": "number", "description": "1=GET, 2=POST, 3=PUT, 4=DELETE." }
-              },
-              "required": ["NO_REST_CUSTOM", "TX_PATH", "TX_CODIGO", "ID_TIPO_CODIGO", "ID_METODO"],
-              "additionalProperties": true
-            }
-          },
-          "required": ["id_projeto", "campos"]
+          "required": ["json_projeto"]
         }
       }
     ]
