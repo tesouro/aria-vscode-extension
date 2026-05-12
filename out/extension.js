@@ -51,6 +51,11 @@ class AriaApiClient {
     async saveDataset(dataset) {
         await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
     }
+    async getEndpointMetadata(endpoint) {
+        const query = buildMetadataQuery(endpoint);
+        const response = await this.request('GET', '/v1/aria-vscode/custom/obtem-metadados', query);
+        return formatMetadataForEditor(response);
+    }
     async getEndpointFormItems() {
         const response = await this.request('GET', '/v1/aria-vscode/custom/items-apex-endpoint');
         const root = asRecord(response);
@@ -211,6 +216,9 @@ class AriaApiClient {
                     });
                     res.on('error', reject);
                 });
+                req.setTimeout(45000, () => {
+                    req.destroy(new Error(`Timeout de 45s na chamada para ${endpointPath}. O servidor demorou demais para responder.`));
+                });
                 req.on('error', reject);
                 if (payload !== undefined) {
                     req.write(payload);
@@ -229,10 +237,16 @@ class AriaApiClient {
             }
         }
         if (statusCode < 200 || statusCode >= 300) {
-            throw new Error(`API retornou ${statusCode}: ${responseBody || 'sem corpo de resposta'}`);
+            const isHtml = responseBody.trimStart().startsWith('<');
+            const bodySnippet = isHtml ? `resposta HTML (status ${statusCode}, provavelmente gateway/proxy)` : (responseBody || 'sem corpo de resposta');
+            throw new Error(`API retornou ${statusCode}: ${bodySnippet}`);
         }
         if (!responseBody.trim()) {
             return undefined;
+        }
+        // Detecta resposta HTML inesperada em 2xx (ex: página de erro de proxy)
+        if (responseBody.trimStart().startsWith('<')) {
+            throw new Error(`API retornou resposta HTML inesperada (esperava JSON). Verifique se o servidor está acessível.`);
         }
         try {
             return JSON.parse(responseBody);
@@ -373,7 +387,7 @@ class EndpointNode extends vscode.TreeItem {
         this.contextValue = 'ariaEndpoint';
         this.command = {
             command: 'aria.editEndpointCode',
-            title: 'Editar Código',
+            title: 'Editar CÃ³digo',
             arguments: [this]
         };
     }
@@ -421,6 +435,8 @@ function activate(context) {
     let requireEntraLogin = getEntraSettings().requireLogin;
     let isLoggedIn = false;
     const editMap = new Map();
+    const metadataUriByEndpoint = new Map();
+    const metadataContentByEndpoint = new Map();
     const output = vscode.window.createOutputChannel('ARIA API Editor');
     const tree = new AriaTreeProvider(() => dataset);
     vscode.window.registerTreeDataProvider('ariaProjectsView', tree);
@@ -675,7 +691,7 @@ function activate(context) {
             vscode.window.showErrorMessage(`Erro ao atualizar arvore: ${toErrorMessage(error)}`);
         }
     }), 
-    // ── Projeto: JSON ────────────────────────────────────────────────────────
+    // â”€â”€ Projeto: JSON â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.editProjectJson', async (node) => {
         if (!dataset) {
             vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.');
@@ -692,7 +708,7 @@ function activate(context) {
         const doc = await vscode.workspace.openTextDocument(filePath);
         await vscode.window.showTextDocument(doc, { preview: false });
     }), 
-    // ── Projeto: Formulário ──────────────────────────────────────────────────
+    // â”€â”€ Projeto: FormulÃ¡rio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.editProjectForm', async (node) => {
         if (!dataset) {
             vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.');
@@ -714,7 +730,7 @@ function activate(context) {
             });
         });
     }), 
-    // ── Endpoint: TX_CODIGO (acao principal) ─────────────────────────────────
+    // â”€â”€ Endpoint: TX_CODIGO (acao principal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.editEndpointCode', async (node) => {
         if (!dataset) {
             vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.');
@@ -736,7 +752,7 @@ function activate(context) {
         const doc = await vscode.workspace.openTextDocument(filePath);
         await vscode.window.showTextDocument(doc, { preview: false });
     }), 
-    // ── Endpoint: JSON ───────────────────────────────────────────────────────
+    // â”€â”€ Endpoint: JSON â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.editEndpointJson', async (node) => {
         if (!dataset) {
             vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.');
@@ -757,7 +773,7 @@ function activate(context) {
         const doc = await vscode.workspace.openTextDocument(filePath);
         await vscode.window.showTextDocument(doc, { preview: false });
     }), 
-    // ── Endpoint: Formulário ─────────────────────────────────────────────────
+    // â”€â”€ Endpoint: FormulÃ¡rio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.editEndpointForm', async (node) => {
         if (!dataset) {
             vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.');
@@ -797,7 +813,7 @@ function activate(context) {
             });
         });
     }), 
-    // ── Endpoint: Criar novo ─────────────────────────────────────────────────
+    // â”€â”€ Endpoint: Criar novo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.createEndpoint', async (node) => {
         if (!dataset) {
             vscode.window.showWarningMessage('Conecte primeiro usando ARIA: Conectar na API.');
@@ -811,7 +827,7 @@ function activate(context) {
             const items = dataset.registros.map((p) => ({
                 label: p.NO_PROJETO,
                 description: p.TX_PATH,
-                detail: `ID ${p.ID_PROJETO} — ${p.REST_CUSTOM.length} endpoint(s)`,
+                detail: `ID ${p.ID_PROJETO} â€” ${p.REST_CUSTOM.length} endpoint(s)`,
                 projectId: p.ID_PROJETO
             }));
             const picked = await vscode.window.showQuickPick(items, {
@@ -836,7 +852,7 @@ function activate(context) {
         const endpointFormItems = await getEndpointFormItems();
         const lovs = await getProjectLovs(targetProjectId);
         const endpointValidations = await getEndpointValidations();
-        openFormWebview(context, `Novo Endpoint — ${project.NO_PROJETO}`, template, ['ID_REST_CUSTOM'], { endpointItems: endpointFormItems, lovs }, async (updated) => {
+        openFormWebview(context, `Novo Endpoint â€” ${project.NO_PROJETO}`, template, ['ID_REST_CUSTOM'], { endpointItems: endpointFormItems, lovs }, async (updated) => {
             const normalizedUpdate = applyLovDisplayValues(updated, lovs);
             normalizedUpdate.TX_PATH = normalizeEndpointPath(normalizedUpdate.TX_PATH);
             const noName = !normalizedUpdate.NO_REST_CUSTOM || String(normalizedUpdate.NO_REST_CUSTOM).trim() === '';
@@ -864,7 +880,7 @@ function activate(context) {
             });
         });
     }), 
-    // ── Salvar editor ativo via API ──────────────────────────────────────────
+    // â”€â”€ Salvar editor ativo via API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     vscode.commands.registerCommand('aria.saveActiveEditor', async () => {
         if (!client || !dataset) {
             vscode.window.showWarningMessage('Conecte na API primeiro antes de salvar.');
@@ -1005,155 +1021,414 @@ function activate(context) {
         await vscode.window.showTextDocument(doc, { preview: false });
         output.show(true);
     }));
-    context.subscriptions.push(vscode.lm.registerTool('aria_list_endpoints', {
-        prepareInvocation(_options, _token) {
-            return { invocationMessage: 'Buscando endpoints do projeto ARIA...' };
-        },
-        async invoke(options, _token) {
-            const projects = dataset?.registros ?? [];
-            let targetProject;
-            if (options.input.projectId !== undefined) {
-                targetProject = projects.find((p) => p.ID_PROJETO === options.input.projectId);
+    // â”€â”€ Language Model Tools (Copilot) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const notConnectedResult = () => new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart('ARIA: Nao conectado. PeÃ§a ao usuÃ¡rio para executar o comando "ARIA: Conectar na API" primeiro.')
+    ]);
+    const findEndpointInCache = (idEndpoint) => {
+        if (!dataset) {
+            return undefined;
+        }
+        for (const project of dataset.registros) {
+            const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === idEndpoint);
+            if (endpoint) {
+                return { endpoint, project };
             }
-            else {
-                const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-                if (activeFile) {
-                    const marker = editMap.get(activeFile);
-                    if (marker) {
-                        targetProject = projects.find((p) => p.ID_PROJETO === marker.projectId);
+        }
+        return undefined;
+    };
+    context.subscriptions.push(
+    // Tool: listar projetos e endpoints
+    vscode.lm.registerTool('aria_listar_projetos', {
+        async invoke(_options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            if (dataset.registros.length === 0) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Nenhum projeto encontrado.')]);
+            }
+            const lines = [];
+            for (const project of dataset.registros) {
+                lines.push(`# Projeto: ${project.NO_PROJETO}`);
+                lines.push(`  ID_PROJETO: ${project.ID_PROJETO}`);
+                lines.push(`  TX_PATH: ${project.TX_PATH}`);
+                if (project.REST_CUSTOM.length === 0) {
+                    lines.push('  (sem endpoints)');
+                }
+                else {
+                    for (const ep of project.REST_CUSTOM) {
+                        const banco = [ep.ID_BANCO_EXTERNO, ep.ID_BANCO_ESQUEMA].filter(Boolean).join('/');
+                        lines.push(`  - [ID ${ep.ID_REST_CUSTOM}] ${ep.NO_REST_CUSTOM} | TX_PATH: ${ep.TX_PATH}${banco ? ` | Banco: ${banco}` : ''}`);
                     }
                 }
+                lines.push('');
             }
-            if (!targetProject) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(lines.join('\n'))]);
+        }
+    }), 
+    // Tool: template de endpoint para criaÃ§Ã£o
+    vscode.lm.registerTool('aria_obter_template_endpoint', {
+        async invoke(options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            const idProjeto = Number(options.input.id_projeto);
+            const projectInCache = dataset.registros.find((p) => p.ID_PROJETO === idProjeto);
+            if (!projectInCache) {
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('Nenhum projeto ARIA carregado ou detectado. Abra um arquivo de endpoint pelo painel ARIA primeiro.')
+                    new vscode.LanguageModelTextPart(`Projeto ${idProjeto} nÃ£o encontrado. Use aria_listar_projetos para ver os IDs disponÃ­veis.`)
                 ]);
             }
-            let detailedProject = targetProject;
+            if (projectInCache.REST_CUSTOM.length === 0) {
+                const lovs = await getProjectLovs(idProjeto);
+                const bancoExterno = lovs?.BANCO_EXTERNO?.[0];
+                const bancoEsquema = bancoExterno?.BANCO_ESQUEMA?.[0];
+                const metodo = lovs?.METODO?.[0];
+                const tipoCodigo = lovs?.TIPO_CODIGO?.find((item) => item.ID_TIPO_CODIGO === 1) ?? lovs?.TIPO_CODIGO?.[0];
+                const lovTemplate = {
+                    ID_METODO: metodo?.ID_METODO ?? 1,
+                    ID_TIPO_CODIGO: tipoCodigo?.ID_TIPO_CODIGO ?? 1,
+                    ID_BANCO_EXTERNO: bancoExterno?.ID_BANCO_EXTERNO ?? '<PREENCHER: ID_BANCO_EXTERNO>',
+                    ID_BANCO_ESQUEMA: bancoEsquema?.ID_BANCO_ESQUEMA ?? '<PREENCHER: ID_BANCO_ESQUEMA>',
+                    IN_MODO_SEGURANCA: '1',
+                    IN_FORMATO_SAIDA: 'json',
+                    SN_PAGINADO: 'N',
+                    SN_NULOS_EXPLICITOS: 'N',
+                    SN_PUBLICADO: 'N',
+                    NO_REST_CUSTOM: '<PREENCHER: nome descritivo do endpoint>',
+                    TX_PATH: '<PREENCHER: caminho URL sem barra inicial, ex: meu-endpoint>',
+                    TX_CODIGO: '<PREENCHER: codigo SQL ou Python gerado com base nos metadados reais do banco>'
+                };
+                const origemBanco = bancoExterno && bancoEsquema
+                    ? `Banco sugerido pelas LOVs: ID_BANCO_EXTERNO=${bancoExterno.ID_BANCO_EXTERNO}, ID_BANCO_ESQUEMA=${bancoEsquema.ID_BANCO_ESQUEMA}.`
+                    : 'Nao foi possivel inferir banco/esquema automaticamente pelas LOVs; preencha manualmente os IDs de banco.';
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`O projeto ${idProjeto} nao tem endpoints existentes para usar como template. ` +
+                        'Foi gerado um template base usando LOVs do projeto para ajudar na definicao do banco/metodo/tipo de codigo. ' +
+                        `${origemBanco}\n\n` +
+                        'Use o JSON abaixo no parametro "campos" de aria_criar_endpoint, ajustando os campos marcados com <PREENCHER>:\n\n' +
+                        JSON.stringify(lovTemplate, null, 2))
+                ]);
+            }
+            const sourceEndpoint = projectInCache.REST_CUSTOM[0];
+            let fullEndpoint = sourceEndpoint;
             try {
-                detailedProject = await getProjectDetails(targetProject.ID_PROJETO);
+                const projectDetails = await getProjectDetails(idProjeto);
+                fullEndpoint = projectDetails.REST_CUSTOM[0] ?? sourceEndpoint;
             }
             catch {
-                // fallback para o cache local caso a carga detalhada falhe
+                // usa cache
             }
-            const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-            const currentEndpointId = activeFile ? editMap.get(activeFile)?.id : undefined;
-            const includeProjectJson = options.input.includeProjectJson !== false;
-            const includeCode = options.input.includeCode !== false;
-            const maxCodeChars = Math.max(200, toNumber(options.input.maxCodeChars) || 6000);
-            const parts = [buildEndpointsSummary(detailedProject, currentEndpointId)];
-            if (includeProjectJson) {
-                const projectJson = buildProjectReferenceJson(detailedProject, {
-                    includeCode,
-                    maxCodeChars
-                });
-                parts.push('');
-                parts.push('### JSON de referencia do projeto');
-                parts.push('```json');
-                parts.push(projectJson);
-                parts.push('```');
-            }
+            const { ID_REST_CUSTOM: _id, NO_REST_CUSTOM: _nome, TX_PATH: _path, TX_CODIGO: _codigo, ...templateFields } = fullEndpoint;
+            const template = {
+                ...templateFields,
+                NO_REST_CUSTOM: '<PREENCHER: nome descritivo do endpoint>',
+                TX_PATH: '<PREENCHER: caminho URL, ex: /meu-endpoint>',
+                TX_CODIGO: '<PREENCHER: cÃ³digo SQL ou Python gerado com base nos metadados reais do banco>'
+            };
             return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(parts.join('\n'))
+                new vscode.LanguageModelTextPart(`Template baseado no endpoint "${fullEndpoint.NO_REST_CUSTOM}" do projeto "${projectInCache.NO_PROJETO}".\n` +
+                    'Copie TODOS os campos abaixo para o parÃ¢metro "campos" de aria_criar_endpoint, ' +
+                    'preenchendo os trÃªs campos marcados com <PREENCHER>:\n\n' +
+                    JSON.stringify(template, null, 2))
             ]);
         }
-    }), vscode.lm.registerTool('aria_create_endpoint', {
-        prepareInvocation(options, _token) {
-            const { name, path: epPath, projectId, projectName } = options.input;
-            const target = projectId !== undefined ? `ID ${projectId}` : (projectName?.trim() || 'detectado automaticamente');
-            return { invocationMessage: `Criando endpoint "${name}" (${epPath}) no projeto ${target}...` };
-        },
+    }), 
+    // Tool: endpoints detalhados de um projeto
+    vscode.lm.registerTool('aria_obter_endpoints_projeto', {
         async invoke(options, _token) {
-            if (!client) {
-                client = new AriaApiClient(getSettings(), acquireAccessToken);
+            if (!client || !dataset) {
+                return notConnectedResult();
             }
-            if (!dataset) {
-                try {
-                    dataset = await client.getProjectEndpointTree();
-                    tree.refresh();
+            const idProjeto = Number(options.input.id_projeto);
+            let projectDetails;
+            try {
+                projectDetails = await getProjectDetails(idProjeto);
+            }
+            catch (error) {
+                return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Erro ao buscar projeto: ${toErrorMessage(error)}`)]);
+            }
+            const summary = projectDetails.REST_CUSTOM.map((ep) => {
+                const { TX_CODIGO: _code, ...rest } = ep;
+                return rest;
+            });
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Projeto: ${projectDetails.NO_PROJETO} (ID ${projectDetails.ID_PROJETO})\n\n` +
+                    JSON.stringify(summary, null, 2))
+            ]);
+        }
+    }), 
+    // Tool: detalhes completos de um endpoint (inclui TX_CODIGO)
+    vscode.lm.registerTool('aria_obter_detalhes_endpoint', {
+        async invoke(options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            const idEndpoint = Number(options.input.id_endpoint);
+            const found = findEndpointInCache(idEndpoint);
+            if (!found) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Endpoint com ID ${idEndpoint} nao encontrado. Use aria_listar_projetos para ver os IDs disponÃ­veis.`)
+                ]);
+            }
+            let detail = found.endpoint;
+            try {
+                const projectDetails = await getProjectDetails(found.project.ID_PROJETO);
+                const ep = projectDetails.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === idEndpoint);
+                if (ep) {
+                    detail = ep;
                 }
-                catch (error) {
+            }
+            catch {
+                // usa cache
+            }
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(JSON.stringify(detail, null, 2))
+            ]);
+        }
+    }), 
+    // Tool: metadados de banco (esquemas/tabelas/colunas)
+    vscode.lm.registerTool('aria_obter_metadados_banco', {
+        async invoke(options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            const idEndpoint = Number(options.input.id_endpoint);
+            const requestedSchemaFilters = Array.isArray(options.input.esquemas)
+                ? options.input.esquemas.map((item) => String(item).trim().toUpperCase()).filter((item) => item.length > 0)
+                : [];
+            const found = findEndpointInCache(idEndpoint);
+            if (!found) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Endpoint com ID ${idEndpoint} nao encontrado.`)
+                ]);
+            }
+            let endpoint = found.endpoint;
+            try {
+                const projectDetails = await getProjectDetails(found.project.ID_PROJETO);
+                const ep = projectDetails.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === idEndpoint);
+                if (ep) {
+                    endpoint = ep;
+                }
+            }
+            catch {
+                // usa cache para parÃ¢metros do banco
+            }
+            try {
+                let fullMetadata = metadataContentByEndpoint.get(idEndpoint);
+                if (!fullMetadata) {
+                    fullMetadata = await client.getEndpointMetadata(endpoint) ?? undefined;
+                    if (fullMetadata) {
+                        metadataContentByEndpoint.set(idEndpoint, fullMetadata);
+                    }
+                }
+                if (!fullMetadata) {
                     return new vscode.LanguageModelToolResult([
-                        new vscode.LanguageModelTextPart(`Nao foi possivel carregar a arvore de projetos automaticamente: ${toErrorMessage(error)}`)
+                        new vscode.LanguageModelTextPart('Nenhum metadado de banco disponÃ­vel para este endpoint (verifique se ID_BANCO_EXTERNO e ID_BANCO_ESQUEMA estÃ£o configurados).')
                     ]);
                 }
-            }
-            if (!dataset) {
+                const filePath = await ensureEditFilePath(`metadata-${idEndpoint}.aria.txt`);
+                await fs.promises.writeFile(filePath, fullMetadata, 'utf8');
+                metadataUriByEndpoint.set(idEndpoint, vscode.Uri.file(filePath));
+                const allSchemas = listMetadataSchemas(fullMetadata);
+                const catalogPreviewLimitChars = 12000;
+                let effectiveSchemaFilters = requestedSchemaFilters;
+                if (effectiveSchemaFilters.length === 0) {
+                    effectiveSchemaFilters = inferPreferredSchemasForMetadata(endpoint, found.project, allSchemas, fullMetadata);
+                }
+                const tableList = buildTableListMetadata(fullMetadata, effectiveSchemaFilters);
+                if (effectiveSchemaFilters.length > 0 && !tableList.trim()) {
+                    return new vscode.LanguageModelToolResult([
+                        new vscode.LanguageModelTextPart(`Nenhuma tabela encontrada para os esquemas informados (${effectiveSchemaFilters.join(', ')}). ` +
+                            `Esquemas disponiveis no catalogo: ${allSchemas.join(', ') || 'nenhum'}.\n\n` +
+                            'O arquivo completo de metadados ja foi baixado e referenciado no chat.')
+                    ]);
+                }
+                if (tableList.length > catalogPreviewLimitChars) {
+                    return new vscode.LanguageModelToolResult([
+                        new vscode.LanguageModelTextPart('Catalogo completo baixado e referenciado no chat, mas a lista de tabelas ainda ficou grande para o contexto atual.\n\n' +
+                            (effectiveSchemaFilters.length > 0
+                                ? `Foi aplicada tentativa automatica de filtro pelos esquemas: ${effectiveSchemaFilters.join(', ')}.\n\n`
+                                : '') +
+                            `Informe quais esquemas deseja usar e chame novamente aria_obter_metadados_banco com o parametro "esquemas". ` +
+                            `Exemplo: {"id_endpoint": ${idEndpoint}, "esquemas": ["SCHEMA1", "SCHEMA2"]}.\n\n` +
+                            `Esquemas disponiveis: ${allSchemas.join(', ') || 'nenhum'}.`)
+                    ]);
+                }
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('Sem conexao ativa com a API ARIA e nao foi possivel carregar a arvore de projetos.')
+                    new vscode.LanguageModelTextPart('Catalogo completo salvo como referencia no chat. ' +
+                        (requestedSchemaFilters.length > 0
+                            ? `Lista filtrada para os esquemas solicitados: ${requestedSchemaFilters.join(', ')}. `
+                            : (effectiveSchemaFilters.length > 0
+                                ? `Lista filtrada automaticamente para os esquemas mais provaveis: ${effectiveSchemaFilters.join(', ')}. `
+                                : '')) +
+                        (requestedSchemaFilters.length === 0 && effectiveSchemaFilters.length === 0
+                            ? 'Nenhum filtro de esquema foi necessario. '
+                            : '') +
+                        'Para obter as colunas de uma tabela especÃ­fica, use aria_obter_colunas_tabela com o id_endpoint e o nome da tabela (SCHEMA.TABELA).\n\n' +
+                        tableList)
                 ]);
             }
-            const { name, path: epPath, code, codeType, method, description } = options.input;
-            if (!name?.trim() || !epPath?.trim()) {
+            catch (error) {
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('Erro: "name" e "path" sao obrigatorios.')
+                    new vscode.LanguageModelTextPart(`Erro ao buscar metadados: ${toErrorMessage(error)}`)
                 ]);
             }
-            const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-            const markerProjectId = activeFile ? editMap.get(activeFile)?.projectId : undefined;
-            const resolved = resolveProjectFromInput(dataset.registros, options.input, markerProjectId);
-            const project = resolved.project;
-            if (!project) {
+        }
+    }), 
+    // Tool: colunas de uma tabela especÃ­fica
+    vscode.lm.registerTool('aria_obter_colunas_tabela', {
+        async invoke(options, _token) {
+            const idEndpoint = Number(options.input.id_endpoint);
+            const tabelaBuscada = String(options.input.tabela ?? '').trim().toUpperCase();
+            const uri = metadataUriByEndpoint.get(idEndpoint);
+            if (!uri) {
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(resolved.error || 'Nao foi possivel identificar o projeto alvo.')
-                ]);
-            }
-            const projectId = project.ID_PROJETO;
-            const normalizedPath = normalizeEndpointPath(epPath);
-            if (project.REST_CUSTOM.some((e) => String(e.TX_PATH || '').toLowerCase() === normalizedPath.toLowerCase())) {
-                return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(`Ja existe endpoint com TX_PATH "${normalizedPath}". Use um path novo para inclusao.`)
+                    new vscode.LanguageModelTextPart(`Metadados do endpoint ${idEndpoint} ainda nÃ£o foram carregados. ` +
+                        'Chame aria_obter_metadados_banco primeiro para baixar e salvar o catÃ¡logo.')
                 ]);
             }
             try {
-                const endpointFormItems = await getEndpointFormItems();
-                const requiredFields = buildRequiredEndpointFieldKeys(endpointFormItems);
-                const lovs = await getProjectLovs(projectId);
-                const endpointValidations = await getEndpointValidations();
-                const codeTypeSelection = resolveCodeTypeSelection(lovs, { codeType, code });
-                await saveWithFreshDataset(`createEndpoint:agent:${projectId}`, projectId, async (draft) => {
-                    const proj = draft.registros.find((p) => p.ID_PROJETO === projectId);
-                    if (!proj) {
-                        throw new Error('Projeto nao encontrado no draft.');
+                const fullMetadata = metadataContentByEndpoint.get(idEndpoint) ?? await fs.promises.readFile(uri.fsPath, 'utf8');
+                const columns = extractTableColumns(fullMetadata, tabelaBuscada);
+                if (!columns) {
+                    return new vscode.LanguageModelToolResult([
+                        new vscode.LanguageModelTextPart(`Tabela "${tabelaBuscada}" nÃ£o encontrada no catÃ¡logo. ` +
+                            'Use aria_obter_metadados_banco para ver a lista de tabelas disponÃ­veis.')
+                    ]);
+                }
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(columns)
+                ]);
+            }
+            catch (error) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Erro ao ler catÃ¡logo salvo: ${toErrorMessage(error)}`)
+                ]);
+            }
+        }
+    }), 
+    // Tool: editar TX_CODIGO de um endpoint
+    vscode.lm.registerTool('aria_editar_codigo_endpoint', {
+        async invoke(options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            const idEndpoint = Number(options.input.id_endpoint);
+            const novoCodigo = String(options.input.novo_codigo ?? '');
+            const found = findEndpointInCache(idEndpoint);
+            if (!found) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Endpoint com ID ${idEndpoint} nao encontrado.`)
+                ]);
+            }
+            try {
+                await saveWithFreshDataset(`tool:editarCodigo:${idEndpoint}`, found.project.ID_PROJETO, async (draft) => {
+                    for (const project of draft.registros) {
+                        const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === idEndpoint);
+                        if (eIdx >= 0) {
+                            project.REST_CUSTOM[eIdx] = { ...project.REST_CUSTOM[eIdx], TX_CODIGO: novoCodigo };
+                            return;
+                        }
                     }
-                    if (proj.REST_CUSTOM.some((e) => String(e.TX_PATH || '').toLowerCase() === normalizedPath.toLowerCase())) {
-                        throw new Error(`Ja existe endpoint com TX_PATH "${normalizedPath}".`);
-                    }
-                    const inferredMethod = inferMethodId(proj, method, lovs);
-                    const draftEndpoint = buildEndpointFromExampleStructure(proj, {
-                        NO_REST_CUSTOM: name.trim(),
-                        TX_PATH: normalizedPath,
-                        ...(code !== undefined ? { TX_CODIGO: code } : {}),
-                        ID_TIPO_CODIGO: codeTypeSelection.id,
-                        NO_TIPO_CODIGO: codeTypeSelection.displayName,
-                        ID_METODO: inferredMethod,
-                        ...(description !== undefined ? { DS_REST_CUSTOM_CURTA: description } : {})
-                    });
-                    if (toNumber(draftEndpoint.ID_BANCO_EXTERNO) <= 0 && lovs?.BANCO_EXTERNO?.length) {
-                        draftEndpoint.ID_BANCO_EXTERNO = lovs.BANCO_EXTERNO[0].ID_BANCO_EXTERNO;
-                    }
-                    if (toNumber(draftEndpoint.ID_TIPO_CODIGO) <= 0 && lovs?.TIPO_CODIGO?.length) {
-                        draftEndpoint.ID_TIPO_CODIGO = lovs.TIPO_CODIGO[0].ID_TIPO_CODIGO;
-                    }
-                    if (toNumber(draftEndpoint.ID_TIPO_HEADER) <= 0 && lovs?.TIPO_HEADER?.length) {
-                        draftEndpoint.ID_TIPO_HEADER = lovs.TIPO_HEADER[0].ID_TIPO_HEADER;
-                    }
-                    const newEndpoint = applyLovDisplayValues(draftEndpoint, lovs);
-                    const missingRequired = requiredFields.filter((fieldName) => isMissingRequiredField(fieldName, newEndpoint[fieldName]));
-                    if (missingRequired.length) {
-                        throw new Error(`Campos obrigatorios nao preenchidos para criar endpoint: ${missingRequired.join(', ')}.`);
-                    }
-                    const validationErrors = validateEndpointPayload(newEndpoint, endpointValidations);
-                    if (validationErrors.length) {
-                        throw new Error(validationErrors.join(' | '));
-                    }
-                    proj.REST_CUSTOM.push(newEndpoint);
+                    throw new Error('Endpoint nao encontrado no dataset atualizado.');
                 });
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart(`Endpoint "${name}" criado com sucesso no projeto "${project.NO_PROJETO}". ` +
-                        `Campos de lista foram sincronizados (ID/NO) e o tipo de codigo foi definido como ${codeTypeSelection.displayName}. ` +
-                        `Defaults de conexao/metodo foram inferidos quando necessario. ` +
-                        `A arvore foi atualizada. Use #aria_list_endpoints para ver todos os endpoints do projeto.`)
+                    new vscode.LanguageModelTextPart(`CÃ³digo do endpoint ${idEndpoint} (${found.endpoint.NO_REST_CUSTOM}) atualizado com sucesso.`)
+                ]);
+            }
+            catch (error) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Erro ao salvar: ${toErrorMessage(error)}`)
+                ]);
+            }
+        }
+    }), 
+    // Tool: editar campos de configuraÃ§Ã£o de um endpoint (nÃ£o o cÃ³digo)
+    vscode.lm.registerTool('aria_editar_campos_endpoint', {
+        async invoke(options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            const idEndpoint = Number(options.input.id_endpoint);
+            const campos = options.input.campos ?? {};
+            const found = findEndpointInCache(idEndpoint);
+            if (!found) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Endpoint com ID ${idEndpoint} nao encontrado.`)
+                ]);
+            }
+            try {
+                await saveWithFreshDataset(`tool:editarCampos:${idEndpoint}`, found.project.ID_PROJETO, async (draft) => {
+                    for (const project of draft.registros) {
+                        const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === idEndpoint);
+                        if (eIdx >= 0) {
+                            const updated = mergePreservingTypes(project.REST_CUSTOM[eIdx], campos);
+                            project.REST_CUSTOM[eIdx] = { ...updated, ID_REST_CUSTOM: idEndpoint };
+                            return;
+                        }
+                    }
+                    throw new Error('Endpoint nao encontrado no dataset atualizado.');
+                });
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Campos do endpoint ${idEndpoint} (${found.endpoint.NO_REST_CUSTOM}) atualizados com sucesso.`)
+                ]);
+            }
+            catch (error) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Erro ao salvar: ${toErrorMessage(error)}`)
+                ]);
+            }
+        }
+    }), 
+    // Tool: criar novo endpoint em um projeto
+    vscode.lm.registerTool('aria_criar_endpoint', {
+        async invoke(options, _token) {
+            if (!client || !dataset) {
+                return notConnectedResult();
+            }
+            const idProjeto = Number(options.input.id_projeto);
+            const campos = options.input.campos ?? {};
+            if (!campos.NO_REST_CUSTOM || !campos.TX_PATH) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart('Campos obrigatÃ³rios ausentes: NO_REST_CUSTOM (nome do endpoint) e TX_PATH (caminho URL).')
+                ]);
+            }
+            const projectExists = dataset.registros.some((p) => p.ID_PROJETO === idProjeto);
+            if (!projectExists) {
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Projeto com ID ${idProjeto} nao encontrado. Use aria_listar_projetos para ver os IDs disponÃ­veis.`)
+                ]);
+            }
+            const nomeNovo = String(campos.NO_REST_CUSTOM);
+            const caminhoNovo = normalizeEndpointPath(String(campos.TX_PATH));
+            const codigoNovo = typeof campos.TX_CODIGO === 'string' ? campos.TX_CODIGO : '';
+            try {
+                await saveWithFreshDataset(`tool:criarEndpoint:${idProjeto}`, idProjeto, async (draft) => {
+                    const project = draft.registros.find((p) => p.ID_PROJETO === idProjeto);
+                    if (!project) {
+                        throw new Error(`Projeto ${idProjeto} nao encontrado no dataset atualizado.`);
+                    }
+                    const { ID_REST_CUSTOM: _ignored, ...camposSemId } = campos;
+                    const newEndpoint = {
+                        ...camposSemId,
+                        NO_REST_CUSTOM: nomeNovo,
+                        TX_PATH: caminhoNovo,
+                        TX_CODIGO: codigoNovo || undefined
+                    };
+                    project.REST_CUSTOM.push(newEndpoint);
+                });
+                const projectAtualizado = dataset?.registros.find((p) => p.ID_PROJETO === idProjeto);
+                const criado = projectAtualizado?.REST_CUSTOM.find((e) => e.NO_REST_CUSTOM === nomeNovo && e.TX_PATH === caminhoNovo);
+                if (!criado) {
+                    return new vscode.LanguageModelToolResult([
+                        new vscode.LanguageModelTextPart(`A API aceitou o request mas o endpoint "${nomeNovo}" nao aparece no dataset atualizado. ` +
+                            'Possivelmente a criacao via importar-json nao e suportada para novos endpoints. ' +
+                            'Verifique com o administrador da API se ha um endpoint dedicado para criacao.')
+                    ]);
+                }
+                return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(`Endpoint "${nomeNovo}" criado com sucesso no projeto ${idProjeto}. ID gerado: ${criado.ID_REST_CUSTOM}.`)
                 ]);
             }
             catch (error) {
@@ -1163,78 +1438,121 @@ function activate(context) {
             }
         }
     }));
-    // ── Copilot: Chat Participant @aria ──────────────────────────────────────
-    const participant = vscode.chat.createChatParticipant('aria.assistant', async (request, ctx, response, token) => {
-        if (!dataset) {
-            response.markdown('Nenhum projeto ARIA carregado. Use **ARIA: Conectar na API** primeiro.');
-            return;
-        }
-        const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
-        const marker = activeFile ? editMap.get(activeFile) : undefined;
-        const projects = dataset.registros;
-        // Build context based on active file or first matching project
-        let contextProject;
-        if (marker) {
-            contextProject = projects.find((p) => p.ID_PROJETO === marker.projectId);
-        }
-        // Build system context message
-        const contextLines = [];
-        if (contextProject) {
-            const currentEndpointId = marker?.type !== 'projectJson' ? marker?.id : undefined;
-            contextLines.push(buildEndpointsSummary(contextProject, currentEndpointId));
-        }
-        else {
-            contextLines.push(`Projetos carregados (${projects.length} total):`);
-            for (const proj of projects.slice(0, 10)) {
-                contextLines.push(`- [ID ${proj.ID_PROJETO}] ${proj.NO_PROJETO} (${proj.TX_PATH}) — ${proj.REST_CUSTOM.length} endpoint(s)`);
-            }
-            if (projects.length > 10) {
-                contextLines.push(`... e mais ${projects.length - 10} projeto(s).`);
-            }
-        }
-        const systemContext = contextLines.join('\n');
-        const projectsJsonContext = buildProjectsContextJson(projects);
-        // Select model (prefer copilot-gpt-4o family, fallback to any)
-        const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-        if (!models.length) {
-            response.markdown('Nenhum modelo de linguagem Copilot disponivel. Verifique se o Copilot esta ativo.');
-            return;
-        }
+    // â”€â”€ Chat Participant @aria â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const ariaParticipant = vscode.chat.createChatParticipant('aria.assistant', async (request, chatContext, response, token) => {
+        const models = await vscode.lm.selectChatModels({ vendor: 'copilot', family: 'gpt-4o' });
         const model = models[0];
+        if (!model) {
+            response.markdown('Nenhum modelo Copilot disponÃ­vel. Verifique se o GitHub Copilot Chat estÃ¡ instalado e ativo.');
+            return;
+        }
+        const ariaTools = vscode.lm.tools.filter((t) => t.name.startsWith('aria_'));
+        const systemPrompt = 'Voce e um assistente especializado na API ARIA (endpoints REST sobre bancos Oracle).\n\n' +
+            '## CRIAR ENDPOINT\n' +
+            '1. aria_listar_projetos para achar o projeto.\n' +
+            '2. aria_obter_template_endpoint para obter campos base.\n' +
+            '3. aria_obter_metadados_banco em qualquer endpoint do projeto para ver tabelas (resultado fica em cache).\n' +
+            '4. aria_obter_colunas_tabela para as tabelas necessarias (so as que vai usar).\n' +
+            '5. Escreva TX_CODIGO completo com tabelas/colunas REAIS. Mostre ao usuario e peca confirmacao.\n' +
+            '6. Apos confirmacao, chame aria_criar_endpoint com todos os campos do template preenchidos.\n' +
+            '6.1. TX_PATH NUNCA comeca com barra.\n\n' +
+            '## EDITAR CODIGO\n' +
+            '1. aria_obter_detalhes_endpoint para ver codigo atual.\n' +
+            '2. aria_obter_metadados_banco para tabelas (se nao tiver em cache).\n' +
+            '3. aria_obter_colunas_tabela para colunas necessarias.\n' +
+            '4. Escreva novo codigo, mostre e peca confirmacao. Apos confirmacao, salve.\n\n' +
+            '## REGRAS DE JOIN\n' +
+            'JOIN so e permitido quando existir FK explicita nos metadados retornados por aria_obter_colunas_tabela.\n' +
+            'Os metadados mostram FKs no formato: FK: COLUNA -> SCHEMA.TABELA(COLUNA_PK)\n' +
+            'Use APENAS essas FKs para montar JOINs. Exemplo:\n' +
+            '  Metadado: FK: ID_AREA -> SIGTI_HOM.AREA(ID_AREA)\n' +
+            '  JOIN correto: LEFT JOIN SIGTI_HOM.AREA ar ON t.ID_AREA = ar.ID_AREA\n' +
+            'Se NAO houver FK entre as tabelas desejadas, NAO faca JOIN. Gere query de tabela unica e avise o usuario.\n\n' +
+            '## FORMATACAO\n' +
+            '- Indente com 2 espacos. Cada coluna do SELECT em linha propria.\n' +
+            '- Quebre WHERE, JOIN, GROUP BY, ORDER BY em linhas separadas.\n' +
+            '- Para SQL: aliases camelCase com aspas duplas (ex: TX_NOTA "nota", ID_VALOR "idValor").\n' +
+            '- Remova prefixos tecnicos (ID_, TX_, NO_, NR_, DT_, SN_, IN_, DS_, CO_) no alias quando fizer sentido.\n\n' +
+            '## REGRAS GERAIS\n' +
+            '- NUNCA invente nomes de tabela, coluna ou schema.\n' +
+            '- NUNCA chame tool de criacao/edicao sem confirmacao explicita do usuario.\n' +
+            '- Antes de alterar, explique o que muda (projeto, endpoint, campos, valores).\n' +
+            '- aria_obter_metadados_banco so precisa ser chamada 1 vez por endpoint (resultado fica em cache automatico).\n' +
+            '- Se uma tool retornar erro, NAO repita com mesmos parametros. Informe o erro ao usuario.\n' +
+            '- Seja direto e eficiente: use o minimo de chamadas de tools necessario para completar a tarefa.';
         const messages = [
-            vscode.LanguageModelChatMessage.User(`Voce e um assistente especializado na plataforma ARIA de APIs. Responda sempre em portugues.\n\nContexto atual:\n\n${systemContext}\n\nArvore de projetos em JSON (fonte da verdade para inferir projeto/id e endpoints):\n\n${projectsJsonContext}`)
+            vscode.LanguageModelChatMessage.User(systemPrompt)
         ];
-        // Include conversation history
-        for (const turn of ctx.history) {
+        for (const turn of chatContext.history) {
             if (turn instanceof vscode.ChatRequestTurn) {
                 messages.push(vscode.LanguageModelChatMessage.User(turn.prompt));
             }
             else if (turn instanceof vscode.ChatResponseTurn) {
                 const text = turn.response
-                    .map((r) => (r instanceof vscode.ChatResponseMarkdownPart ? r.value.value : ''))
+                    .filter((p) => p instanceof vscode.ChatResponseMarkdownPart)
+                    .map((p) => p.value.value)
                     .join('');
-                if (text.trim()) {
+                if (text) {
                     messages.push(vscode.LanguageModelChatMessage.Assistant(text));
                 }
             }
         }
         messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
-        const chatResponse = await model.sendRequest(messages, {}, token);
-        for await (const fragment of chatResponse.text) {
-            response.markdown(fragment);
+        const failedTools = new Map();
+        for (let iteration = 0; iteration < 8 && !token.isCancellationRequested; iteration++) {
+            const chatResponse = await model.sendRequest(messages, { tools: ariaTools }, token);
+            const toolCalls = [];
+            for await (const chunk of chatResponse.stream) {
+                if (chunk instanceof vscode.LanguageModelTextPart) {
+                    response.markdown(chunk.value);
+                }
+                else if (chunk instanceof vscode.LanguageModelToolCallPart) {
+                    toolCalls.push(chunk);
+                }
+            }
+            if (toolCalls.length === 0) {
+                break;
+            }
+            messages.push(vscode.LanguageModelChatMessage.Assistant(toolCalls));
+            for (const tc of toolCalls) {
+                response.progress(`Executando ${tc.name}...`);
+            }
+            const toolResults = [];
+            for (const toolCall of toolCalls) {
+                const toolKey = toolCall.name + ':' + JSON.stringify(toolCall.input);
+                const prevFails = failedTools.get(toolKey) ?? 0;
+                if (prevFails >= 2) {
+                    toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, [
+                        new vscode.LanguageModelTextPart(`Tool ${toolCall.name} ja falhou ${prevFails} vezes com os mesmos parametros. Nao tente novamente. Informe o erro ao usuario.`)
+                    ]));
+                    continue;
+                }
+                try {
+                    const result = await vscode.lm.invokeTool(toolCall.name, { input: toolCall.input, toolInvocationToken: request.toolInvocationToken }, token);
+                    toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, result.content));
+                    failedTools.delete(toolKey);
+                }
+                catch (err) {
+                    failedTools.set(toolKey, prevFails + 1);
+                    toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, [
+                        new vscode.LanguageModelTextPart(`Erro ao executar ${toolCall.name}: ${toErrorMessage(err)}. NAO repita esta chamada com os mesmos parametros.`)
+                    ]));
+                }
+            }
+            messages.push(vscode.LanguageModelChatMessage.User(toolResults));
+            for (const toolCall of toolCalls) {
+                if (toolCall.name === 'aria_obter_metadados_banco') {
+                    const endpointId = Number(toolCall.input.id_endpoint);
+                    const uri = metadataUriByEndpoint.get(endpointId);
+                    if (uri) {
+                        response.reference(uri);
+                    }
+                }
+            }
         }
     });
-    participant.iconPath = new vscode.ThemeIcon('server-environment');
-    participant.followupProvider = {
-        provideFollowups(_result, _ctx, _token) {
-            return [
-                { prompt: 'Liste todos os endpoints deste projeto', label: 'Listar endpoints', command: 'listar' },
-                { prompt: 'Quais endpoints deste projeto sao do tipo GET?', label: 'Endpoints GET' },
-                { prompt: 'Crie um novo endpoint GET /exemplo com SELECT 1 FROM dual', label: 'Criar endpoint de exemplo' }
-            ];
-        }
-    };
-    context.subscriptions.push(participant);
+    ariaParticipant.iconPath = new vscode.ThemeIcon('database');
+    context.subscriptions.push(ariaParticipant);
     context.subscriptions.push({
         dispose: () => {
             void client?.close();
@@ -1282,7 +1600,7 @@ function buildEndpointFromExampleStructure(project, overrides) {
     let variableArr = [];
     if (variables.length) {
         variableArr = variables.map((v, idx) => ({
-            ID_VARIABLE: 10000 + idx, // temporário, backend sobrescreve
+            ID_VARIABLE: 10000 + idx, // temporÃ¡rio, backend sobrescreve
             TX_REGEX_QS: v.name,
             NO_VARIABLE: v.name,
             IN_ORIGEM_VARIABLE: v.origem,
@@ -1366,7 +1684,7 @@ function buildEndpointsSummary(project, currentEndpointId) {
     const methodNames = { 1: 'GET', 2: 'POST', 3: 'PUT', 4: 'DELETE' };
     for (const ep of project.REST_CUSTOM) {
         const isCurrent = ep.ID_REST_CUSTOM === currentEndpointId;
-        const marker = isCurrent ? ' ← **(endpoint sendo editado)**' : '';
+        const marker = isCurrent ? ' â† **(endpoint sendo editado)**' : '';
         const method = typeof ep.ID_METODO === 'number' ? ` [${methodNames[ep.ID_METODO] ?? ep.ID_METODO}]` : '';
         lines.push(`- **[ID ${ep.ID_REST_CUSTOM}]${method} ${ep.NO_REST_CUSTOM}**${marker}`);
         lines.push(`  - Caminho: \`${ep.TX_PATH}\``);
@@ -1425,6 +1743,192 @@ function buildProjectReferenceJson(project, options) {
         TX_PATH: project.TX_PATH,
         REST_CUSTOM: restCustom
     }, null, 2);
+}
+function buildMetadataQuery(endpoint) {
+    const query = {};
+    addMetadataQueryValue(query, 'p_id_banco_externo', endpoint.ID_BANCO_EXTERNO ?? endpoint.id_banco_externo);
+    addMetadataQueryValue(query, 'p_id_banco_esquema', endpoint.ID_BANCO_ESQUEMA ?? endpoint.id_banco_esquema);
+    addMetadataQueryValue(query, 'p_co_esquema', endpoint.CO_ESQUEMA ?? endpoint.co_esquema);
+    addMetadataQueryValue(query, 'p_co_tabela', endpoint.CO_TABELA ?? endpoint.co_tabela);
+    return Object.keys(query).length > 0 ? query : undefined;
+}
+function addMetadataQueryValue(query, key, value) {
+    if (value === null || value === undefined) {
+        return;
+    }
+    const normalized = String(value).trim();
+    if (!normalized) {
+        return;
+    }
+    query[key] = normalized;
+}
+function formatMetadataForEditor(response) {
+    if (response === null || response === undefined) {
+        return undefined;
+    }
+    if (typeof response === 'string') {
+        const trimmed = response.trim();
+        return trimmed ? trimmed : undefined;
+    }
+    try {
+        return JSON.stringify(response, null, 2);
+    }
+    catch {
+        return String(response);
+    }
+}
+function buildTableListMetadata(full, schemaFilters = []) {
+    const lines = full.split(/\r?\n/);
+    const output = [];
+    const filterSet = new Set(schemaFilters.map((item) => item.toUpperCase()));
+    const useFilter = filterSet.size > 0;
+    for (const line of lines) {
+        if (line.startsWith('# ')) {
+            if (!useFilter) {
+                output.push(line);
+            }
+        }
+        else if (line.startsWith('## ')) {
+            const tableOnly = line.replace(/^(## \S+).*$/, '$1');
+            const tableName = tableOnly.replace(/^##\s+/, '');
+            const schemaName = tableName.includes('.') ? tableName.split('.')[0].toUpperCase() : '';
+            if (!useFilter || (schemaName && filterSet.has(schemaName))) {
+                output.push(tableOnly);
+            }
+        }
+    }
+    return output.join('\n');
+}
+function listMetadataSchemas(full) {
+    const lines = full.split(/\r?\n/);
+    const schemas = new Set();
+    for (const line of lines) {
+        if (!line.startsWith('## ')) {
+            continue;
+        }
+        const tableOnly = line.replace(/^(## \S+).*$/, '$1').replace(/^##\s+/, '');
+        const schemaName = tableOnly.includes('.') ? tableOnly.split('.')[0].toUpperCase() : '';
+        if (schemaName) {
+            schemas.add(schemaName);
+        }
+    }
+    return Array.from(schemas).sort((a, b) => a.localeCompare(b));
+}
+function inferPreferredSchemasForMetadata(endpoint, project, allSchemas, full) {
+    if (allSchemas.length === 0) {
+        return [];
+    }
+    if (allSchemas.length === 1) {
+        return [allSchemas[0]];
+    }
+    const schemaSet = new Set(allSchemas.map((item) => item.toUpperCase()));
+    const endpointSchema = toStringSafe(endpoint.CO_ESQUEMA ?? endpoint.co_esquema).trim().toUpperCase();
+    const tableFrequency = countMetadataTablesBySchema(full);
+    const projectSchemaFrequency = countProjectSchemas(project);
+    const projectTokens = extractKeywordTokens(`${project.NO_PROJETO} ${project.TX_PATH}`);
+    const ranked = allSchemas
+        .map((schema) => {
+        const normalized = schema.toUpperCase();
+        let score = 0;
+        if (endpointSchema && normalized === endpointSchema) {
+            score += 120;
+        }
+        score += (projectSchemaFrequency[normalized] || 0) * 35;
+        score += (tableFrequency[normalized] || 0);
+        for (const token of projectTokens) {
+            if (normalized.includes(token)) {
+                score += 18;
+            }
+        }
+        // Reforco para dominios comuns no projeto de series temporais.
+        if ((normalized.includes('SERIE') || normalized.includes('TEMPORA')) && projectTokens.some((t) => t.startsWith('SERIE') || t.startsWith('TEMPOR'))) {
+            score += 30;
+        }
+        return { schema: normalized, score };
+    })
+        .sort((a, b) => b.score - a.score || a.schema.localeCompare(b.schema));
+    const top = ranked.filter((item) => item.score > 0).slice(0, 3).map((item) => item.schema);
+    if (top.length > 0) {
+        return top;
+    }
+    // Fallback: schema mais frequente no catalogo.
+    let preferred = '';
+    let maxCount = 0;
+    for (const [schema, count] of Object.entries(tableFrequency)) {
+        if (!schemaSet.has(schema)) {
+            continue;
+        }
+        if (count > maxCount) {
+            preferred = schema;
+            maxCount = count;
+        }
+    }
+    return preferred ? [preferred] : [];
+}
+function countProjectSchemas(project) {
+    const counts = {};
+    for (const endpoint of project.REST_CUSTOM || []) {
+        const schema = toStringSafe(endpoint.CO_ESQUEMA ?? endpoint.co_esquema).trim().toUpperCase();
+        if (!schema) {
+            continue;
+        }
+        counts[schema] = (counts[schema] || 0) + 1;
+    }
+    return counts;
+}
+function extractKeywordTokens(text) {
+    const normalized = text
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase();
+    const stopwords = new Set(['API', 'ENDPOINT', 'PROJETO', 'DADOS', 'BASE', 'SISTEMA', 'SERVICO']);
+    const tokens = normalized
+        .split(/[^A-Z0-9]+/)
+        .map((item) => item.trim())
+        .filter((item) => item.length >= 4 && !stopwords.has(item));
+    return Array.from(new Set(tokens));
+}
+function countMetadataTablesBySchema(full) {
+    const lines = full.split(/\r?\n/);
+    const counts = {};
+    for (const line of lines) {
+        if (!line.startsWith('## ')) {
+            continue;
+        }
+        const tableOnly = line.replace(/^(## \S+).*$/, '$1').replace(/^##\s+/, '');
+        const schemaName = tableOnly.includes('.') ? tableOnly.split('.')[0].toUpperCase() : '';
+        if (!schemaName) {
+            continue;
+        }
+        counts[schemaName] = (counts[schemaName] || 0) + 1;
+    }
+    return counts;
+}
+function extractTableColumns(full, tableKey) {
+    const lines = full.split(/\r?\n/);
+    let inside = false;
+    const result = [];
+    for (const line of lines) {
+        if (line.startsWith('## ')) {
+            if (inside) {
+                break;
+            }
+            const tableHeader = line.replace(/^(## \S+).*$/, '$1').replace(/^## /, '').toUpperCase();
+            if (tableHeader === tableKey || tableHeader.endsWith('.' + tableKey)) {
+                inside = true;
+                result.push(line.replace(/^(## \S+).*$/, '$1'));
+            }
+        }
+        else if (inside) {
+            if (line.startsWith('# ')) {
+                break;
+            }
+            if (line.startsWith('- ')) {
+                result.push(line);
+            }
+        }
+    }
+    return result.length > 0 ? result.join('\n') : undefined;
 }
 function getSettings() {
     const config = vscode.workspace.getConfiguration('ariaApi');
@@ -2726,7 +3230,7 @@ function buildFormHtml(title, data, excludeKeys, options) {
       <div class="actions-copy">Revise os grupos abaixo e salve quando terminar. O payload enviado continua compativel com o importa_json.</div>
       <div class="actions-main">
         <span class="status" id="status"></span>
-        <button type="button" id="validateBtn">Validar Código</button>
+        <button type="button" id="validateBtn">Validar CÃ³digo</button>
         <button type="submit">Salvar via API</button>
       </div>
     </div>
@@ -2802,10 +3306,10 @@ window.addEventListener('message', function(event) {
     status.className = 'status err';
   } else if (msg.type === 'validate-result') {
     if (msg.status === 'sucesso') {
-      status.textContent = 'Código válido: ' + (msg.mensagem || '');
+      status.textContent = 'CÃ³digo vÃ¡lido: ' + (msg.mensagem || '');
       status.className = 'status ok';
     } else {
-      status.textContent = 'Erro de validação: ' + (msg.mensagem || '');
+      status.textContent = 'Erro de validaÃ§Ã£o: ' + (msg.mensagem || '');
       status.className = 'status err';
     }
   }
@@ -2843,7 +3347,7 @@ function openFormWebview(context, title, data, excludeKeys, renderOptions, onSav
         }
         else if (message.command === 'validate') {
             try {
-                // Monta payload para validação
+                // Monta payload para validaÃ§Ã£o
                 const body = {
                     p_id_tipo_codigo: message.data.ID_TIPO_CODIGO,
                     p_id_banco_externo: message.data.ID_BANCO_EXTERNO,
