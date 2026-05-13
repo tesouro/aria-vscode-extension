@@ -219,7 +219,7 @@ class AriaApiClient {
     const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/items-apex-endpoint');
     const root = asRecord(response);
     const rows = asArray(root?.registros) || [];
-    return rows.map((item) => this.mapEndpointFormItem(item));
+    return rows.map((item) => this.mapEndpointFormItem(item)).filter(item => item.ITEM_NAME !== '');
   }
 
   public async getEndpointValidations(): Promise<EndpointValidationItem[]> {
@@ -678,6 +678,142 @@ function hasSelectStarInText(text: string): boolean {
   return /\bselect\s+(?:distinct\s+)?(?:\*|[a-zA-Z_][\w$]*\s*\.\s*\*)\b/i.test(text);
 }
 
+function splitSelectColumns(selectClause: string): string[] {
+  const cols: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (let i = 0; i < selectClause.length; i++) {
+    const ch = selectClause[i];
+    if (ch === '(') {
+      depth++;
+      current += ch;
+      continue;
+    }
+    if (ch === ')') {
+      depth = Math.max(0, depth - 1);
+      current += ch;
+      continue;
+    }
+    if (ch === ',' && depth === 0) {
+      if (current.trim()) {
+        cols.push(current.trim());
+      }
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) {
+    cols.push(current.trim());
+  }
+  return cols;
+}
+
+function extractAliasName(token: string): string | undefined {
+  const t = token.trim();
+  if (!t) {
+    return undefined;
+  }
+
+  const asQuoted = t.match(/\bas\s+"([^"]+)"\s*$/i) || t.match(/\bas\s+'([^']+)'\s*$/i);
+  if (asQuoted?.[1]) {
+    return asQuoted[1].trim();
+  }
+
+  const asPlain = t.match(/\bas\s+([A-Za-z_][\w$]*)\s*$/i);
+  if (asPlain?.[1]) {
+    return asPlain[1].trim();
+  }
+
+  const trailingQuoted = t.match(/\s+"([^"]+)"\s*$/) || t.match(/\s+'([^']+)'\s*$/);
+  if (trailingQuoted?.[1]) {
+    return trailingQuoted[1].trim();
+  }
+
+  const trailingPlain = t.match(/\s+([A-Za-z_][\w$]*)\s*$/);
+  if (trailingPlain?.[1]) {
+    const maybeKeyword = trailingPlain[1].toLowerCase();
+    if (maybeKeyword !== 'from' && maybeKeyword !== 'where' && maybeKeyword !== 'join') {
+      return trailingPlain[1].trim();
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeAliasToken(value: string): string {
+  return toStringSafe(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]+/g, '')
+    .toLowerCase();
+}
+
+function extractSourceColumnName(token: string): string {
+  const t = token.trim();
+  if (!t) {
+    return '';
+  }
+
+  let expr = t;
+  expr = expr.replace(/\bas\s+(?:"[^"]+"|'[^']+'|[A-Za-z_][\w$]*)\s*$/i, '').trim();
+  expr = expr.replace(/\s+(?:"[^"]+"|'[^']+'|[A-Za-z_][\w$]*)\s*$/, '').trim();
+
+  const parts = expr.split('.').map((p) => p.trim()).filter(Boolean);
+  const last = parts.length ? parts[parts.length - 1] : expr;
+  return last.replace(/^"|"$/g, '').replace(/^'|'$/g, '').trim();
+}
+
+function analyzeSqlAliasIssues(sql: string): { missingAlias: string[]; nonMnemonicAlias: string[] } {
+  const selectMatch = sql.match(/\bselect\b([\s\S]*?)\bfrom\b/i);
+  if (!selectMatch) {
+    return { missingAlias: [], nonMnemonicAlias: [] };
+  }
+
+  const selectClause = selectMatch[1];
+  const cols = splitSelectColumns(selectClause);
+  const missingAlias: string[] = [];
+  const nonMnemonicAlias: string[] = [];
+
+  for (const token of cols) {
+    const alias = extractAliasName(token);
+    if (!alias) {
+      missingAlias.push(token);
+      continue;
+    }
+
+    const sourceColumn = extractSourceColumnName(token);
+    const aliasNorm = normalizeAliasToken(alias);
+    const sourceNorm = normalizeAliasToken(sourceColumn);
+
+    // Alias must be meaningful for JSON mapping: not empty and not the same raw column name.
+    if (!aliasNorm || (sourceNorm && aliasNorm === sourceNorm)) {
+      nonMnemonicAlias.push(token);
+    }
+  }
+
+  return { missingAlias, nonMnemonicAlias };
+}
+
+function hasColumnAlias(token: string): boolean {
+  if (!token || !token.trim()) return false;
+  const t = token.trim();
+  // Accept patterns like: COL as "alias", COL as alias, COL "alias", or COL alias
+  // Also accept when AS is present anywhere (case-insensitive).
+  if (/\bas\b/i.test(t)) return true;
+
+  // Match trailing quoted alias: "alias" or 'alias'
+  if (/["']\s*[^"']+\s*["']\s*$/.test(t)) return true;
+
+  // Match unquoted trailing alias (single identifier) after whitespace
+  if (/\s+[A-Za-z_][\w]*\s*$/.test(t)) {
+    // ensure token is not just a bare column (no whitespace) - here whitespace exists so last word is likely alias
+    return true;
+  }
+
+  return false;
+}
+
 function isAffirmativeConfirmationPrompt(prompt: string): boolean {
   const normalized = toStringSafe(prompt)
     .normalize('NFD')
@@ -712,6 +848,90 @@ function isEndpointProposalCompleteForConfirmation(text: string): boolean {
   const hasConfirmationAsk = /(confirma|confirmacao|deseja prosseguir|posso prosseguir|pode criar|pode prosseguir)/.test(normalized);
 
   return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk;
+}
+
+function extractToolResultText(content: readonly unknown[]): string {
+  const chunks: string[] = [];
+  for (const part of content) {
+    if (part instanceof vscode.LanguageModelTextPart) {
+      chunks.push(part.value);
+    }
+  }
+  return chunks.join('\n').trim();
+}
+
+function inferBestProjectForContext(projects: AriaProject[], text: string): AriaProject | undefined {
+  if (!projects.length) {
+    return undefined;
+  }
+
+  const normalizedText = toStringSafe(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  const tokens = extractKeywordTokens(text).map((item) => item.toLowerCase());
+
+  let bestProject: AriaProject | undefined;
+  let bestScore = -1;
+
+  for (const project of projects) {
+    const projectName = toStringSafe(project.NO_PROJETO).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const projectPath = toStringSafe(project.TX_PATH).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    let score = 0;
+
+    if (projectName && normalizedText.includes(projectName)) {
+      score += 100;
+    }
+    if (projectPath && normalizedText.includes(projectPath)) {
+      score += 60;
+    }
+
+    const nameTokens = extractKeywordTokens(project.NO_PROJETO).map((item) => item.toLowerCase());
+    for (const token of tokens) {
+      if (nameTokens.includes(token)) {
+        score += 15;
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestProject = project;
+    }
+  }
+
+  return bestProject ?? projects[0];
+}
+
+function buildImportDatasetFromProposal(
+  proposal: unknown,
+  baseProject: AriaProject,
+  contextText: string
+): AriaDataset | undefined {
+  const root = asRecord(proposal);
+  if (!root) {
+    return undefined;
+  }
+
+  if (Array.isArray(root.registros) && root.registros.length > 0) {
+    return proposal as AriaDataset;
+  }
+
+  const endpointTemplate = { ...root } as Record<string, unknown>;
+  const endpoint = buildEndpointFromExampleStructure(
+    baseProject,
+    endpointTemplate,
+    undefined,
+    { ignoreExplicitBankFields: false }
+  );
+
+  const updatedProject: AriaProject = {
+    ...baseProject,
+    REST_CUSTOM: [...baseProject.REST_CUSTOM, endpoint as AriaEndpoint]
+  };
+
+  return {
+    registros: [updatedProject]
+  };
 }
 
 function resolveCodeTypeSelection(
@@ -1916,6 +2136,30 @@ export function activate(context: vscode.ExtensionContext): void {
             registros: enrichedProjects
           };
 
+          // Normalize VARIABLE entries: ensure TX_REGEX_QS exists (can be same as NO_VARIABLE)
+          for (const project of payload.registros ?? []) {
+            for (const endpointRaw of project.REST_CUSTOM ?? []) {
+              const ep = endpointRaw as Record<string, unknown>;
+              const vars = asArray(ep.VARIABLE) ?? [];
+              if (vars.length > 0) {
+                const normalizedVars: Record<string, unknown>[] = [];
+                for (let vi = 0; vi < vars.length; vi++) {
+                  const rawVar = asRecord(vars[vi]) || {};
+                  const noVariable = toStringSafe(rawVar.NO_VARIABLE || rawVar.NO_VARIABLE || rawVar.TX_REGEX_QS).trim() || '';
+                  const txRegex = toStringSafe(rawVar.TX_REGEX_QS).trim() || noVariable;
+                  normalizedVars.push({
+                    ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
+                    NO_VARIABLE: noVariable,
+                    TX_REGEX_QS: txRegex,
+                    IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE ?? rawVar.IN_ORIGEM_VARIABLE,
+                    TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
+                  });
+                }
+                ep.VARIABLE = normalizedVars;
+              }
+            }
+          }
+
           const metadataMissing: string[] = [];
           const metadataTableErrors: string[] = [];
 
@@ -1988,6 +2232,8 @@ export function activate(context: vscode.ExtensionContext): void {
           }
 
           const invalidSqlEndpoints: string[] = [];
+          const missingAliasEndpoints: string[] = [];
+          const nonMnemonicAliasEndpoints: string[] = [];
           for (const project of payload?.registros ?? []) {
             for (const endpointRaw of project?.REST_CUSTOM ?? []) {
               const endpoint = endpointRaw as unknown as Record<string, unknown>;
@@ -2006,12 +2252,55 @@ export function activate(context: vscode.ExtensionContext): void {
             }
           }
 
+          // Check for column aliases in SELECT clause for SQL endpoints
+          for (const project of payload?.registros ?? []) {
+            for (const endpointRaw of project?.REST_CUSTOM ?? []) {
+              const endpoint = endpointRaw as unknown as Record<string, unknown>;
+              if (!isSqlEndpointCodeType(endpoint)) { continue; }
+              const sql = toStringSafe(endpoint.TX_CODIGO);
+              if (!sql) { continue; }
+
+              const aliasIssues = analyzeSqlAliasIssues(sql);
+              if (aliasIssues.missingAlias.length > 0) {
+                const endpointName = toStringSafe(endpoint.NO_REST_CUSTOM) || '(sem nome)';
+                const endpointPath = toStringSafe(endpoint.TX_PATH) || '(sem path)';
+                missingAliasEndpoints.push(`${endpointName} [${endpointPath}]`);
+              }
+
+              if (aliasIssues.nonMnemonicAlias.length > 0) {
+                const endpointName = toStringSafe(endpoint.NO_REST_CUSTOM) || '(sem nome)';
+                const endpointPath = toStringSafe(endpoint.TX_PATH) || '(sem path)';
+                nonMnemonicAliasEndpoints.push(`${endpointName} [${endpointPath}]`);
+              }
+            }
+          }
+
           if (invalidSqlEndpoints.length > 0) {
             return new vscode.LanguageModelToolResult([
               new vscode.LanguageModelTextPart(
                 'Importacao bloqueada: endpoint SQL com "select *" detectado. ' +
                 'Para SQL, liste colunas explicitamente e use aliases mnemônicos para o JSON (ex: COLUNA as "nomeCampo").\n\n' +
                 `Endpoints com problema:\n- ${invalidSqlEndpoints.join('\n- ')}`
+              )
+            ]);
+          }
+
+          if (missingAliasEndpoints.length > 0) {
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Importacao bloqueada: endpoint SQL com colunas sem aliases mnemônicos detectado. ' +
+                'Cada coluna no SELECT deve usar um alias que será o nome do campo no JSON (ex: m.ID as "idProjeto").\n\n' +
+                `Endpoints com problema:\n- ${missingAliasEndpoints.join('\n- ')}`
+              )
+            ]);
+          }
+
+          if (nonMnemonicAliasEndpoints.length > 0) {
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Importacao bloqueada: aliases nao mnemônicos detectados em endpoint SQL. ' +
+                'Nao use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de JSON como "origem", "nome", "idProjeto" etc.\n\n' +
+                `Endpoints com problema:\n- ${nonMnemonicAliasEndpoints.join('\n- ')}`
               )
             ]);
           }
@@ -2148,12 +2437,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Busca projetos-endpoints e envia como contexto inicial para o modelo
     let projetosJson = '[]';
+    let projetosRegistros: AriaProject[] = [];
     const knownSchemaIds = new Set<number>();
     const knownSchemaNames = new Set<string>();
     let schemaLockText = '';
     try {
       response.progress('Carregando contexto de projetos...');
       const projetosData = await client.getProjectEndpointTree();
+      projetosRegistros = projetosData.registros;
       projetosJson = JSON.stringify(projetosData.registros, null, 2);
       schemaLockText = buildProjectSchemaLockSummary(projetosData.registros, request.prompt);
 
@@ -2266,7 +2557,10 @@ export function activate(context: vscode.ExtensionContext): void {
       '',
       'ESCRITA DO SQL — REGRAS INVIOLAVEIS:',
       '  !! PROIBIDO: SELECT * ou SELECT tabela.* em qualquer situacao. Sem excecao.',
-      '  - Liste TODAS as colunas do SELECT de forma explicita: SCHEMA.TABELA.COLUNA as "alias".',
+      '  - Liste TODAS as colunas do SELECT de forma explicita e atribua ALIASES MNEMÔNICOS: use `AS "alias"`, `AS alias` ou a forma abreviada `COLUNA "alias"`.',
+      '    O alias definido e o NOME que sera usado no JSON de resposta (ex: `m.ID_MICRO as "idMicro"`).',
+      '  - Alias obrigatorio em TODAS as colunas do SELECT, inclusive da tabela principal. Exemplo valido: `P.ID_PROJETO "id"`, `P.NO_PROJETO "nome"`.',
+      '  - Exemplo invalido: `P.ID_PROJETO` (sem alias) e `O.NO_ORIGEM AS ORIGEM` (alias nao mnemônico igual ao nome da coluna).',
       '  - O alias SERA o nome do campo no JSON de resposta da API. Use nomes claros em camelCase.',
       '     Exemplo: m.ID_MICRO as "idMicro", m.NO_MICRO as "nomeMicro"',
       '  - Use o nome qualificado SCHEMA.TABELA nas clausulas FROM/JOIN.',
@@ -2308,6 +2602,8 @@ export function activate(context: vscode.ExtensionContext): void {
       '- NUNCA invente tabela, coluna, schema ou FK que nao existam no arquivo de metadados.',
       '- NUNCA faca JOIN sem FK declarada no arquivo de metadados entre as tabelas envolvidas.',
       '- NUNCA use SELECT * ou SELECT tabela.*. Sempre liste colunas com alias camelCase.',
+      '- NUNCA deixe coluna sem alias no SELECT.',
+      '- NUNCA use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de resposta JSON (ex: origem, nomeProjeto).',
       '- NUNCA emita mensagem intermediaria entre chamadas de tools e a proposta final ao usuario.',
       '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
       '- NUNCA chame aria_importar_json sem confirmacao explicita do usuario.',
@@ -2347,13 +2643,28 @@ export function activate(context: vscode.ExtensionContext): void {
 
     messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
 
+    const chatHistoryAssistantText = chatContext.history
+      .filter((turn): turn is vscode.ChatResponseTurn => turn instanceof vscode.ChatResponseTurn)
+      .flatMap((turn) => turn.response)
+      .filter((part): part is vscode.ChatResponseMarkdownPart => part instanceof vscode.ChatResponseMarkdownPart)
+      .map((part) => part.value.value)
+      .join('\n')
+      .toLowerCase();
+
     const isEndpointMutationIntent = (() => {
       const prompt = toStringSafe(request.prompt).toLowerCase();
       const hasEndpoint = prompt.includes('endpoint');
       const hasMutationVerb =
         /\b(criar|crie|novo|editar|edite|alterar|atualizar)\b/.test(prompt) ||
         /\b(criacao|edicao|alteracao|atualizacao)\b/.test(prompt);
-      return hasEndpoint && hasMutationVerb;
+      const directMutationIntent = hasEndpoint && hasMutationVerb;
+
+      const isAffirmative = isAffirmativeConfirmationPrompt(prompt);
+      const hasPendingEndpointProposal =
+        /\b(proposta do endpoint|sql final|nome do endpoint|tx_path|id_banco_externo|confirme se deseja prosseguir)\b/.test(chatHistoryAssistantText) ||
+        /\b(endpoint|sql|tx_codigo|rest_custom)\b/.test(chatHistoryAssistantText);
+
+      return directMutationIntent || (isAffirmative && hasPendingEndpointProposal);
     })();
 
     const isAffirmativeReply = isAffirmativeConfirmationPrompt(request.prompt);
@@ -2374,159 +2685,35 @@ export function activate(context: vscode.ExtensionContext): void {
       `[${new Date().toISOString()}] @aria: "${request.prompt.slice(0, 120)}", ${messages.length} msgs, ${ariaTools.length} tools`
     );
 
-    // Short-circuit: se o usuario respondeu afirmativamente ("Sim") em fluxo de criacao/edicao
-    // tentamos extrair o JSON do projeto/endpoint da ultima resposta do assistente e executar o import.
+    // Quando o usuario confirma, o modelo usa tools normais MENOS as de pipeline de metadados
+    // (metadados ja foram carregados na requisicao anterior e estao em cache).
+    // O modelo pode chamar aria_obter_lovs, aria_obter_json_projeto, aria_obter_itens_apex e aria_importar_json.
+    const METADATA_PIPELINE_TOOLS = new Set([
+      'aria_obter_metadados',
+      'aria_obter_esquemas_metadados',
+      'aria_obter_tabelas_metadados',
+      'aria_obter_colunas_metadados'
+    ]);
+
+    const toolsForModel = (isEndpointMutationIntent && isAffirmativeReply)
+      ? ariaTools.filter((t) => !METADATA_PIPELINE_TOOLS.has(t.name))
+      : ariaTools;
+
     if (isEndpointMutationIntent && isAffirmativeReply) {
-      output.appendLine(`[${new Date().toISOString()}] @aria: affirmative reply detected - attempting immediate import.`);
-
-      const assistantTexts: string[] = [];
-      for (const turn of chatContext.history) {
-        if (turn instanceof vscode.ChatResponseTurn) {
-          const text = turn.response
-            .filter((p): p is vscode.ChatResponseMarkdownPart => p instanceof vscode.ChatResponseMarkdownPart)
-            .map((p) => p.value.value)
-            .join('');
-          if (text && text.trim()) {
-            assistantTexts.push(text);
-          }
-        }
-      }
-
-      const tryExtractJsonObject = (text: string): any | undefined => {
-        const firstBrace = text.indexOf('{');
-        if (firstBrace === -1) { return undefined; }
-
-        for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-          let depth = 0;
-          for (let i = start; i < text.length; i++) {
-            const ch = text[i];
-            if (ch === '{') { depth++; }
-            else if (ch === '}') { depth--; if (depth === 0) {
-              const candidate = text.slice(start, i + 1);
-              try {
-                return JSON.parse(candidate);
-              } catch {
-                break;
-              }
-            } }
-          }
-        }
-        return undefined;
-      };
-
-      let found: any | undefined;
-      for (let i = assistantTexts.length - 1; i >= 0 && !found; i--) {
-        const t = assistantTexts[i];
-        // prefer explicit project JSON blocks containing REST_CUSTOM
-        const json = tryExtractJsonObject(t);
-        if (json && (Array.isArray((json as any).REST_CUSTOM) || typeof (json as any).ID_PROJETO === 'number' || Array.isArray((json as any).registros))) {
-          found = json;
-          break;
-        }
-      }
-
-      if (found) {
-        try {
-          output.appendLine(`[${new Date().toISOString()}] @aria: invoking aria_importar_json with extracted JSON.`);
-          const invokeResult = await vscode.lm.invokeTool('aria_importar_json', { input: { json_projeto: found }, toolInvocationToken: request.toolInvocationToken }, token);
-
-          // Try to present the tool result to the user.
-          if (invokeResult && Array.isArray((invokeResult as any).content)) {
-            const parts = (invokeResult as any).content;
-            const joined = parts
-              .map((p: any) => (p && typeof p.value === 'string') ? p.value : (p && p.value && p.value.value ? p.value.value : ''))
-              .filter((s: string) => !!s)
-              .join('\n');
-            response.markdown(joined || 'Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
-          } else {
-            response.markdown('Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
-          }
-        } catch (err) {
-          output.appendLine(`[${new Date().toISOString()}] @aria: aria_importar_json failed: ${toErrorMessage(err)}`);
-          response.markdown(`Falha ao executar importacao automaticamente: ${toErrorMessage(err)}. Por favor, cole o JSON do projeto para eu tentar novamente.`);
-        }
-
-        return; // finaliza participante apos tentativa de importacao
-      }
-
-      // Se nao encontramos JSON, pedimos ao modelo (SEM TOOLS) que gere APENAS o JSON
-      // completo do projeto para importar. Isso evita que o modelo reexucute o pipeline
-      // de metadados repetidamente.
-      try {
-        const askJson = 'Por favor, retorne APENAS um objeto JSON válido contendo o projeto completo pronto para importar via importar-json. ' +
-          'O JSON deve ter `ID_PROJETO` e `REST_CUSTOM` (array com o endpoint proposto). Inclua `TX_CODIGO` com a query SQL final. Nao inclua textos explicativos, apenas o JSON.';
-
-        const forcedMessages = [
-          ...messages,
-          vscode.LanguageModelChatMessage.User(askJson)
-        ];
-
-        const forcedResponse = await model.sendRequest(forcedMessages, { tools: [] }, token);
-        let forcedText = '';
-        for await (const chunk of forcedResponse.stream) {
-          if (chunk instanceof vscode.LanguageModelTextPart) {
-            forcedText += chunk.value;
-          }
-        }
-
-        const tryExtractJson = (text: string): any | undefined => {
-          try {
-            // Try code fence JSON first
-            const fenceMatch = text.match(/```json\s*([\s\S]*?)```/i);
-            const candidate = fenceMatch ? fenceMatch[1] : text;
-            // find first {..} balanced
-            const firstBrace = candidate.indexOf('{');
-            if (firstBrace === -1) { return undefined; }
-            for (let start = candidate.indexOf('{'); start !== -1; start = candidate.indexOf('{', start + 1)) {
-              let depth = 0;
-              for (let i = start; i < candidate.length; i++) {
-                const ch = candidate[i];
-                if (ch === '{') depth++;
-                else if (ch === '}') {
-                  depth--;
-                  if (depth === 0) {
-                    const substr = candidate.slice(start, i + 1);
-                    try { return JSON.parse(substr); } catch { break; }
-                  }
-                }
-              }
-            }
-          } catch {
-            // ignore
-          }
-          return undefined;
-        };
-
-        const extracted = tryExtractJson(forcedText);
-        if (extracted) {
-          output.appendLine(`[${new Date().toISOString()}] @aria: extracted JSON from forced model response, invoking import.`);
-          try {
-            const importRes = await vscode.lm.invokeTool('aria_importar_json', { input: { json_projeto: extracted }, toolInvocationToken: request.toolInvocationToken }, token);
-            if (importRes && Array.isArray((importRes as any).content)) {
-              const parts = (importRes as any).content;
-              const joined = parts
-                .map((p: any) => (p && typeof p.value === 'string') ? p.value : (p && p.value && p.value.value ? p.value.value : ''))
-                .filter((s: string) => !!s)
-                .join('\n');
-              response.markdown(joined || 'Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
-            } else {
-              response.markdown('Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
-            }
-            return;
-          } catch (err) {
-            output.appendLine(`[${new Date().toISOString()}] @aria: aria_importar_json failed after forced model JSON: ${toErrorMessage(err)}`);
-            response.markdown(`Falha ao importar automaticamente: ${toErrorMessage(err)}. Por favor cole o JSON do projeto.`);
-            return;
-          }
-        }
-      } catch (err) {
-        output.appendLine(`[${new Date().toISOString()}] @aria: forced model JSON request failed: ${toErrorMessage(err)}`);
-        response.markdown('Nao foi possivel gerar automaticamente o JSON do endpoint. Por favor cole o JSON do projeto aqui para eu tentar importar.');
-        return;
-      }
+      output.appendLine(`[${new Date().toISOString()}] @aria: affirmative reply - tools restricted to: ${toolsForModel.map((t) => t.name).join(', ')}`);
+      // Metadados ja estavam carregados na requisicao anterior; marcar como presentes para os guardrails
+      metadataCalledInRequest = true;
+      metadataSchemasListedInRequest = true;
+      metadataTablesListedInRequest = true;
+      metadataColumnsListedInRequest = true;
+      messages.push(vscode.LanguageModelChatMessage.User(
+        'O usuario confirmou a proposta. ' +
+        'Use o historico da conversa para montar o JSON completo do endpoint e chamar aria_importar_json. ' +
+        'Para obter o JSON completo do projeto (com todos os campos obrigatorios), chame aria_obter_json_projeto. ' +
+        'Os metadados ja estao carregados — NAO chame aria_obter_metadados nem nenhuma tool de metadados. ' +
+        'Chame aria_importar_json com o projeto completo e apenas o endpoint novo em REST_CUSTOM (ID_REST_CUSTOM = 0).'
+      ));
     }
-
-    const toolsForModel = (isEndpointMutationIntent && isAffirmativeReply) ? [] : ariaTools;
 
     for (let iteration = 0; iteration < 10 && !token.isCancellationRequested; iteration++) {
       let chatResponse: vscode.LanguageModelChatResponse;
@@ -2622,6 +2809,20 @@ export function activate(context: vscode.ExtensionContext): void {
               .map((item) => normalizeTableRef(item))
               .filter((item) => item.length > 0);
 
+            const aliasIssues = analyzeSqlAliasIssues(bufferedText);
+            if (aliasIssues.missingAlias.length > 0 || aliasIssues.nonMnemonicAlias.length > 0) {
+              output.appendLine(
+                `[${new Date().toISOString()}] Guardrail: resposta SQL bloqueada por aliases ausentes/nao mnemônicos.`
+              );
+
+              messages.push(vscode.LanguageModelChatMessage.User(
+                'Regra obrigatoria de alias no SQL: TODA coluna do SELECT deve ter alias mnemônico para JSON. ' +
+                'Nao use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). ' +
+                'Use formato como: P.ID_PROJETO "id", P.NO_PROJETO "nome", O.NO_ORIGEM AS "origem".'
+              ));
+              continue;
+            }
+
             const missingColumnContext = sqlTables.filter((tableRef) => {
               const nameOnly = tableRefNameOnly(tableRef);
               return !columnMetadataRequestedTables.has(tableRef) && !columnMetadataRequestedTables.has(nameOnly);
@@ -2666,6 +2867,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       const toolResults: vscode.LanguageModelToolResultPart[] = [];
+      let finalizedAfterImport = false;
+      let finalizedAfterImportMessage = '';
       for (const toolCall of toolCalls) {
         let toolInput = (toolCall.input as Record<string, unknown>) ?? {};
 
@@ -2731,6 +2934,16 @@ export function activate(context: vscode.ExtensionContext): void {
             { input: toolInput as object, toolInvocationToken: request.toolInvocationToken },
             token
           );
+
+          if (toolCall.name === 'aria_importar_json') {
+            const importText = extractToolResultText(result.content);
+            finalizedAfterImport = true;
+            finalizedAfterImportMessage = importText || 'Importacao processada.';
+            toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, result.content));
+            output.appendLine(`[${new Date().toISOString()}] Guardrail: encerrando fluxo apos aria_importar_json para evitar novas chamadas de metadados.`);
+            break;
+          }
+
           toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, result.content));
           // Se metadados foram obtidos, adiciona referencia ao arquivo no chat
           if (toolCall.name === 'aria_obter_metadados') {
@@ -2765,6 +2978,11 @@ export function activate(context: vscode.ExtensionContext): void {
             new vscode.LanguageModelTextPart(`Erro ao executar ${toolCall.name}: ${toErrorMessage(err)}`)
           ]));
         }
+      }
+
+      if (finalizedAfterImport) {
+        response.markdown(finalizedAfterImportMessage);
+        return;
       }
 
       messages.push(vscode.LanguageModelChatMessage.User(toolResults));
