@@ -678,6 +678,57 @@ function hasSelectStarInText(text: string): boolean {
   return /\bselect\s+(?:distinct\s+)?(?:\*|[a-zA-Z_][\w$]*\s*\.\s*\*)\b/i.test(text);
 }
 
+function extractSqlCandidateFromText(text: string): string | undefined {
+  const source = toStringSafe(text);
+  if (!source.trim()) {
+    return undefined;
+  }
+
+  const fencedSqlMatch = source.match(/```sql\s*([\s\S]*?)```/i);
+  if (fencedSqlMatch?.[1] && /\bselect\b[\s\S]*\bfrom\b/i.test(fencedSqlMatch[1])) {
+    return fencedSqlMatch[1].trim();
+  }
+
+  const genericFenceMatches = source.match(/```([\s\S]*?)```/g) ?? [];
+  for (const block of genericFenceMatches) {
+    const body = block.replace(/^```[a-zA-Z0-9_-]*\s*/i, '').replace(/```$/i, '').trim();
+    if (/\bselect\b[\s\S]*\bfrom\b/i.test(body)) {
+      return body;
+    }
+  }
+
+  const selectIndex = source.search(/\bselect\b/i);
+  if (selectIndex === -1) {
+    return undefined;
+  }
+
+  const tail = source.slice(selectIndex);
+  const stopPatterns = [
+    /\n\s*(?:nome do endpoint|caminho|tx_path|metodo|metodo http|tipo de codigo|linguagem|banco externo|esquema|descricao curta|ds_rest_custom_curta|tx_comentarios|comentarios|confirma|deseja prosseguir|posso prosseguir)\b/i,
+    /```/
+  ];
+
+  let endIndex = tail.length;
+  for (const pattern of stopPatterns) {
+    const match = tail.match(pattern);
+    if (match?.index !== undefined && match.index >= 0) {
+      endIndex = Math.min(endIndex, match.index);
+    }
+  }
+
+  return tail.slice(0, endIndex).trim() || undefined;
+}
+
+function hasQuotedIdentifiersOutsideAliases(sql: string): boolean {
+  const source = toStringSafe(sql);
+  if (!source.trim()) {
+    return false;
+  }
+
+  const strippedAllowedAliases = source.replace(/\bAS\s+"[^"]+"/gi, 'AS __ALIAS__');
+  return strippedAllowedAliases.includes('"');
+}
+
 function splitSelectColumns(selectClause: string): string[] {
   const cols: string[] = [];
   let current = '';
@@ -749,6 +800,11 @@ function normalizeAliasToken(value: string): string {
     .toLowerCase();
 }
 
+function isCamelCaseAlias(value: string): boolean {
+  const alias = toStringSafe(value).trim();
+  return /^[a-z][A-Za-z0-9]*$/.test(alias);
+}
+
 function extractSourceColumnName(token: string): string {
   const t = token.trim();
   if (!t) {
@@ -776,6 +832,10 @@ function analyzeSqlAliasIssues(sql: string): { missingAlias: string[]; nonMnemon
   const nonMnemonicAlias: string[] = [];
 
   for (const token of cols) {
+    if (!/[A-Za-z_][\w$]*(?:\s*\.\s*[A-Za-z_][\w$]*)?|\(/.test(token)) {
+      continue;
+    }
+
     const alias = extractAliasName(token);
     if (!alias) {
       missingAlias.push(token);
@@ -786,8 +846,8 @@ function analyzeSqlAliasIssues(sql: string): { missingAlias: string[]; nonMnemon
     const aliasNorm = normalizeAliasToken(alias);
     const sourceNorm = normalizeAliasToken(sourceColumn);
 
-    // Alias must be meaningful for JSON mapping: not empty and not the same raw column name.
-    if (!aliasNorm || (sourceNorm && aliasNorm === sourceNorm)) {
+    // Alias must be camelCase and meaningful for JSON mapping: not empty and not the same raw column name.
+    if (!isCamelCaseAlias(alias) || !aliasNorm || (sourceNorm && aliasNorm === sourceNorm)) {
       nonMnemonicAlias.push(token);
     }
   }
@@ -849,6 +909,48 @@ function isEndpointProposalCompleteForConfirmation(text: string): boolean {
   const hasSql = /\bselect\b[\s\S]+\bfrom\b/.test(normalized);
 
   return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk && hasSql;
+}
+
+function looksLikeEndpointProposalWithoutSql(text: string): boolean {
+  const normalized = toStringSafe(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (!normalized.trim()) {
+    return false;
+  }
+
+  const proposalSignals = [
+    /proposta do endpoint/i,
+    /tabela base/i,
+    /joins?/i,
+    /campos selecionados/i,
+    /método http|metodo http/i,
+    /banco e esquema/i,
+    /próximos passos|proximos passos/i,
+    /confirme se deseja prosseguir/i
+  ];
+
+  return proposalSignals.some((pattern) => pattern.test(normalized)) && !/\bselect\b[\s\S]*\bfrom\b/i.test(normalized);
+}
+
+function isEndpointProposalReadyForImport(text: string): boolean {
+  if (!isEndpointProposalCompleteForConfirmation(text)) {
+    return false;
+  }
+
+  const sql = extractSqlCandidateFromText(text);
+  if (!sql) {
+    return false;
+  }
+
+  if (hasSelectStar(sql)) {
+    return false;
+  }
+
+  const aliasIssues = analyzeSqlAliasIssues(sql);
+  return aliasIssues.missingAlias.length === 0 && aliasIssues.nonMnemonicAlias.length === 0;
 }
 
 function extractToolResultText(content: readonly unknown[]): string {
@@ -1247,6 +1349,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     const draftProject = freshDataset.registros[0];
+    for (const endpoint of draftProject.REST_CUSTOM ?? []) {
+      endpoint.SN_MODO_COMPATIBILIDADE = 'N';
+      if (endpoint.IN_TIPO_TRANSFORMACAO === '') {
+        endpoint.IN_TIPO_TRANSFORMACAO = null;
+      }
+    }
     const previousEndpointIds = new Set(draftProject.REST_CUSTOM.map((endpoint) => endpoint.ID_REST_CUSTOM));
 
     await mutate(freshDataset);
@@ -2091,6 +2199,7 @@ export function activate(context: vscode.ExtensionContext): void {
           }
 
           const projectCache = new Map<number, AriaProject>();
+          const existingEndpointIdsByProjectId = new Map<number, Set<number>>();
           const enrichedProjects: AriaProject[] = [];
 
           for (const rawProject of inputProjects) {
@@ -2113,6 +2222,11 @@ export function activate(context: vscode.ExtensionContext): void {
               }
               projectCache.set(projectId, fullProject);
             }
+
+            existingEndpointIdsByProjectId.set(
+              projectId,
+              new Set((fullProject.REST_CUSTOM ?? []).map((endpoint) => toNumber(endpoint.ID_REST_CUSTOM)))
+            );
 
             const incomingEndpoints = asArray(incomingProject.REST_CUSTOM) ?? [];
             const normalizedEndpoints = incomingEndpoints.map((endpoint) => {
@@ -2173,9 +2287,14 @@ export function activate(context: vscode.ExtensionContext): void {
           const metadataTableErrors: string[] = [];
 
           for (const project of payload.registros ?? []) {
+            const projectId = toNumber(project.ID_PROJETO);
+            const existingEndpointIds = existingEndpointIdsByProjectId.get(projectId) ?? new Set<number>();
+
             for (const endpointRaw of project.REST_CUSTOM ?? []) {
               const endpoint = endpointRaw as unknown as Record<string, unknown>;
-              if (!isSqlEndpointCodeType(endpoint)) {
+              const endpointId = toNumber(endpoint.ID_REST_CUSTOM);
+              const isNewEndpoint = endpointId <= 0 || !existingEndpointIds.has(endpointId);
+              if (!isNewEndpoint || !isSqlEndpointCodeType(endpoint)) {
                 continue;
               }
 
@@ -2241,12 +2360,15 @@ export function activate(context: vscode.ExtensionContext): void {
           }
 
           const invalidSqlEndpoints: string[] = [];
-          const missingAliasEndpoints: string[] = [];
-          const nonMnemonicAliasEndpoints: string[] = [];
           for (const project of payload?.registros ?? []) {
+            const projectId = toNumber(project.ID_PROJETO);
+            const existingEndpointIds = existingEndpointIdsByProjectId.get(projectId) ?? new Set<number>();
+
             for (const endpointRaw of project?.REST_CUSTOM ?? []) {
               const endpoint = endpointRaw as unknown as Record<string, unknown>;
-              if (!isSqlEndpointCodeType(endpoint)) {
+              const endpointId = toNumber(endpoint.ID_REST_CUSTOM);
+              const isNewEndpoint = endpointId <= 0 || !existingEndpointIds.has(endpointId);
+              if (!isNewEndpoint || !isSqlEndpointCodeType(endpoint)) {
                 continue;
               }
 
@@ -2261,55 +2383,12 @@ export function activate(context: vscode.ExtensionContext): void {
             }
           }
 
-          // Check for column aliases in SELECT clause for SQL endpoints
-          for (const project of payload?.registros ?? []) {
-            for (const endpointRaw of project?.REST_CUSTOM ?? []) {
-              const endpoint = endpointRaw as unknown as Record<string, unknown>;
-              if (!isSqlEndpointCodeType(endpoint)) { continue; }
-              const sql = toStringSafe(endpoint.TX_CODIGO);
-              if (!sql) { continue; }
-
-              const aliasIssues = analyzeSqlAliasIssues(sql);
-              if (aliasIssues.missingAlias.length > 0) {
-                const endpointName = toStringSafe(endpoint.NO_REST_CUSTOM) || '(sem nome)';
-                const endpointPath = toStringSafe(endpoint.TX_PATH) || '(sem path)';
-                missingAliasEndpoints.push(`${endpointName} [${endpointPath}]`);
-              }
-
-              if (aliasIssues.nonMnemonicAlias.length > 0) {
-                const endpointName = toStringSafe(endpoint.NO_REST_CUSTOM) || '(sem nome)';
-                const endpointPath = toStringSafe(endpoint.TX_PATH) || '(sem path)';
-                nonMnemonicAliasEndpoints.push(`${endpointName} [${endpointPath}]`);
-              }
-            }
-          }
-
           if (invalidSqlEndpoints.length > 0) {
             return new vscode.LanguageModelToolResult([
               new vscode.LanguageModelTextPart(
-                'Importacao bloqueada: endpoint SQL com "select *" detectado. ' +
-                'Para SQL, liste colunas explicitamente e use aliases mnemônicos para o JSON (ex: COLUNA as "nomeCampo").\n\n' +
+                'Importacao bloqueada: novo endpoint SQL com "select *" detectado. ' +
+                'Para endpoint novo, liste colunas explicitamente e use aliases camelCase ENTRE ASPAS DUPLAS para o JSON (ex: COLUNA AS "nomeCampo").\n\n' +
                 `Endpoints com problema:\n- ${invalidSqlEndpoints.join('\n- ')}`
-              )
-            ]);
-          }
-
-          if (missingAliasEndpoints.length > 0) {
-            return new vscode.LanguageModelToolResult([
-              new vscode.LanguageModelTextPart(
-                'Importacao bloqueada: endpoint SQL com colunas sem aliases mnemônicos detectado. ' +
-                'Cada coluna no SELECT deve usar um alias que será o nome do campo no JSON (ex: m.ID as "idProjeto").\n\n' +
-                `Endpoints com problema:\n- ${missingAliasEndpoints.join('\n- ')}`
-              )
-            ]);
-          }
-
-          if (nonMnemonicAliasEndpoints.length > 0) {
-            return new vscode.LanguageModelToolResult([
-              new vscode.LanguageModelTextPart(
-                'Importacao bloqueada: aliases nao mnemônicos detectados em endpoint SQL. ' +
-                'Nao use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de JSON como "origem", "nome", "idProjeto" etc.\n\n' +
-                `Endpoints com problema:\n- ${nonMnemonicAliasEndpoints.join('\n- ')}`
               )
             ]);
           }
@@ -2603,8 +2682,11 @@ export function activate(context: vscode.ExtensionContext): void {
       '    O alias definido e o NOME que sera usado no JSON de resposta (ex: `m.ID_MICRO as "idMicro"`).',
       '  - Alias obrigatorio em TODAS as colunas do SELECT, inclusive da tabela principal. Exemplo valido: `P.ID_PROJETO "id"`, `P.NO_PROJETO "nome"`.',
       '  - Exemplo invalido: `P.ID_PROJETO` (sem alias) e `O.NO_ORIGEM AS ORIGEM` (alias nao mnemônico igual ao nome da coluna).',
-      '  - O alias SERA o nome do campo no JSON de resposta da API. Use nomes claros em camelCase.',
-      '     Exemplo: m.ID_MICRO as "idMicro", m.NO_MICRO as "nomeMicro"',
+      '  - O alias SERA o nome do campo no JSON de resposta da API. Use obrigatoriamente camelCase ENTRE ASPAS DUPLAS: AS "idProjeto".',
+      '    Essa regra vale apenas para endpoints novos incluidos pela IA; endpoints existentes editados podem preservar o alias atual.',
+      '     Exemplo: m.ID_MICRO AS "idMicro", m.NO_MICRO AS "nomeMicro"',
+      '  - NUNCA coloque aspas duplas em tabelas, schemas ou colunas. Aspas duplas sao permitidas somente nos aliases, por exemplo: `p.ID_PROJETO AS "idProjeto"`.',
+      '  - NUNCA escreva `"p"."ID_PROJETO"` nem `"COSIS_SISGP"."PROJETO"`. Use `p.ID_PROJETO AS "idProjeto"`. Isso é muito importante. Muito importante mesmo.',
       '  - Use o nome qualificado SCHEMA.TABELA nas clausulas FROM/JOIN.',
       '  - Nao inclua coluna cuja existencia voce nao confirmou no bloco ## da tabela nos metadados.',
       '',
@@ -2643,9 +2725,9 @@ export function activate(context: vscode.ExtensionContext): void {
       '',
       '- NUNCA invente tabela, coluna, schema ou FK que nao existam no arquivo de metadados.',
       '- NUNCA faca JOIN sem FK declarada no arquivo de metadados entre as tabelas envolvidas.',
-      '- NUNCA use SELECT * ou SELECT tabela.*. Sempre liste colunas com alias camelCase.',
+      '- NUNCA use SELECT * ou SELECT tabela.*. Sempre liste colunas com alias camelCase ENTRE ASPAS DUPLAS: AS "nomeCampo".',
       '- NUNCA deixe coluna sem alias no SELECT.',
-      '- NUNCA use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de resposta JSON (ex: origem, nomeProjeto).',
+      '- NUNCA use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de resposta JSON em camelCase e entre aspas duplas (ex: AS "origem", AS "nomeProjeto").',
       '- NUNCA termine SQL puro com ponto e virgula (;). O banco executa internamente; ; causa erro de syntax. (PL/SQL e Python podem usar ; normalmente.)',
       '- NUNCA emita mensagem intermediaria entre chamadas de tools e a proposta final ao usuario.',
       '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
@@ -2694,6 +2776,14 @@ export function activate(context: vscode.ExtensionContext): void {
       .join('\n')
       .toLowerCase();
 
+    const lastAssistantResponseText = [...chatContext.history]
+      .reverse()
+      .find((turn): turn is vscode.ChatResponseTurn => turn instanceof vscode.ChatResponseTurn)
+      ?.response
+      .filter((part): part is vscode.ChatResponseMarkdownPart => part instanceof vscode.ChatResponseMarkdownPart)
+      .map((part) => part.value.value)
+      .join('') ?? '';
+
     const isEndpointMutationIntent = (() => {
       const prompt = toStringSafe(request.prompt).toLowerCase();
       const hasEndpoint = prompt.includes('endpoint');
@@ -2706,8 +2796,9 @@ export function activate(context: vscode.ExtensionContext): void {
       const hasPendingEndpointProposal =
         /\b(proposta do endpoint|sql final|nome do endpoint|tx_path|id_banco_externo|confirme se deseja prosseguir)\b/.test(chatHistoryAssistantText) ||
         /\b(endpoint|sql|tx_codigo|rest_custom)\b/.test(chatHistoryAssistantText);
+      const hasReadyPendingEndpointProposal = isEndpointProposalReadyForImport(lastAssistantResponseText);
 
-      return directMutationIntent || (isAffirmative && hasPendingEndpointProposal);
+      return directMutationIntent || (isAffirmative && (hasReadyPendingEndpointProposal || hasPendingEndpointProposal));
     })();
 
     const isAffirmativeReply = isAffirmativeConfirmationPrompt(request.prompt);
@@ -2742,6 +2833,8 @@ export function activate(context: vscode.ExtensionContext): void {
       ? ariaTools.filter((t) => !METADATA_PIPELINE_TOOLS.has(t.name))
       : ariaTools;
 
+    const hasReadyPendingEndpointProposal = isEndpointProposalReadyForImport(lastAssistantResponseText);
+
     if (isEndpointMutationIntent && isAffirmativeReply) {
       output.appendLine(`[${new Date().toISOString()}] @aria: affirmative reply - tools restricted to: ${toolsForModel.map((t) => t.name).join(', ')}`);
       // Metadados ja estavam carregados na requisicao anterior; marcar como presentes para os guardrails
@@ -2750,11 +2843,18 @@ export function activate(context: vscode.ExtensionContext): void {
       metadataTablesListedInRequest = true;
       metadataColumnsListedInRequest = true;
       messages.push(vscode.LanguageModelChatMessage.User(
-        'O usuario confirmou a proposta. ' +
-        'Use o historico da conversa para montar o JSON completo do endpoint e chamar aria_importar_json. ' +
-        'Para obter o JSON completo do projeto (com todos os campos obrigatorios), chame aria_obter_json_projeto. ' +
-        'Os metadados ja estao carregados — NAO chame aria_obter_metadados nem nenhuma tool de metadados. ' +
-        'Chame aria_importar_json com o projeto completo e apenas o endpoint novo em REST_CUSTOM (ID_REST_CUSTOM = 0).'
+        hasReadyPendingEndpointProposal
+          ? 'O usuario confirmou a proposta. ' +
+            'Use o historico da conversa para montar o JSON completo do endpoint e chamar aria_importar_json. ' +
+            'Para obter o JSON completo do projeto (com todos os campos obrigatorios), chame aria_obter_json_projeto. ' +
+            'Os metadados ja estao carregados — NAO chame aria_obter_metadados nem nenhuma tool de metadados. ' +
+            'Chame aria_importar_json com o projeto completo e apenas o endpoint novo em REST_CUSTOM (ID_REST_CUSTOM = 0).'
+          : 'O usuario respondeu afirmativamente, mas a ultima proposta ainda nao estava pronta para importacao. ' +
+            'Antes de chamar aria_importar_json, corrija a proposta usando o historico: monte SQL final com aliases camelCase entre aspas duplas em todas as colunas, ' +
+            'inclua todos os campos do endpoint para confirmacao e entao gere o JSON completo do projeto. ' +
+            'Para obter o JSON completo do projeto (com todos os campos obrigatorios), chame aria_obter_json_projeto. ' +
+            'Os metadados ja estao carregados — NAO chame aria_obter_metadados nem nenhuma tool de metadados. ' +
+            'Nao peca nova confirmacao; apenas corrija internamente e execute a importacao.'
       ));
     }
 
@@ -2847,24 +2947,41 @@ export function activate(context: vscode.ExtensionContext): void {
 
         if (isEndpointMutationIntent) {
           const hasSqlCandidate = /\bselect\b[\s\S]*\bfrom\b/i.test(bufferedTextLower);
-          if (hasSqlCandidate) {
-            const sqlTables = extractSqlReferencedTables(bufferedText)
-              .map((item) => normalizeTableRef(item))
-              .filter((item) => item.length > 0);
 
-            const aliasIssues = analyzeSqlAliasIssues(bufferedText);
-            if (aliasIssues.missingAlias.length > 0 || aliasIssues.nonMnemonicAlias.length > 0) {
+          if (looksLikeEndpointProposalWithoutSql(bufferedText)) {
+            output.appendLine(
+              `[${new Date().toISOString()}] Guardrail: resposta bloqueada por proposta de endpoint sem SQL.`
+            );
+
+            messages.push(vscode.LanguageModelChatMessage.User(
+              'A proposta de endpoint esta incompleta: faltou o SQL final. ' +
+              'Reescreva a resposta incluindo obrigatoriamente a query completa (SELECT ... FROM ...), ' +
+              'com aliases camelCase entre aspas duplas em todas as colunas, e so entao apresente a proposta para confirmacao.'
+            ));
+            continue;
+          }
+
+          if (hasSqlCandidate) {
+            const extractedSql = extractSqlCandidateFromText(bufferedText) ?? bufferedText;
+
+            if (hasQuotedIdentifiersOutsideAliases(extractedSql)) {
               output.appendLine(
-                `[${new Date().toISOString()}] Guardrail: resposta SQL bloqueada por aliases ausentes/nao mnemônicos.`
+                `[${new Date().toISOString()}] Guardrail: resposta SQL bloqueada por aspas indevidas em tabela/schema/coluna.`
               );
 
               messages.push(vscode.LanguageModelChatMessage.User(
-                'Regra obrigatoria de alias no SQL: TODA coluna do SELECT deve ter alias mnemônico para JSON. ' +
-                'Nao use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). ' +
-                'Use formato como: P.ID_PROJETO "id", P.NO_PROJETO "nome", O.NO_ORIGEM AS "origem".'
+                'Reescreva o SQL sem aspas duplas em tabelas, schemas ou colunas. ' +
+                'Aspas duplas sao permitidas somente nos aliases das colunas, no formato `AS "idProjeto"`. ' +
+                'Exemplo correto: `p.ID_PROJETO AS "idProjeto"`; exemplo incorreto: `"p"."ID_PROJETO" AS "idProjeto"`.'
               ));
               continue;
             }
+
+            const sqlTables = extractSqlReferencedTables(extractedSql)
+              .map((item) => normalizeTableRef(item))
+              .filter((item) => item.length > 0);
+
+            // Alias camelCase continua sendo exigido para os novos endpoints, mas so analisamos SQL limpo.
 
             const missingColumnContext = sqlTables.filter((tableRef) => {
               const nameOnly = tableRefNameOnly(tableRef);
@@ -2891,7 +3008,7 @@ export function activate(context: vscode.ExtensionContext): void {
               messages.push(vscode.LanguageModelChatMessage.User(
                 'Proposta incompleta para confirmacao do usuario. Reescreva incluindo TODOS os itens: ' +
                 'Nome do Endpoint, Caminho (TX_PATH), Metodo HTTP, Tipo de Codigo/Linguagem, Banco Externo, Esquema, ' +
-                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, SQL completo (SELECT ... FROM ...) e pergunta unica de confirmacao. ' +
+                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, SQL completo (SELECT ... FROM ...) com aliases camelCase entre aspas duplas em TODAS as colunas e pergunta unica de confirmacao. ' +
                 'O SQL nao deve terminar com ponto e virgula (;).'
               ));
               continue;
@@ -5577,6 +5694,10 @@ function openFormWebview(
     async (message: { command: string; data: Record<string, unknown> }) => {
       if (message.command === 'save') {
         try {
+          message.data.SN_MODO_COMPATIBILIDADE = 'N';
+          if (message.data.IN_TIPO_TRANSFORMACAO === '') {
+            message.data.IN_TIPO_TRANSFORMACAO = null;
+          }
           void panel.webview.postMessage({ type: 'saving' });
           const savingIndicator = vscode.window.setStatusBarMessage('$(sync~spin) ARIA: salvando via API...');
           try {
@@ -5601,11 +5722,15 @@ function openFormWebview(
         }
       } else if (message.command === 'validate') {
         try {
+          const snModoCompatibilidade = 'N';
+          const inTipoTransformacao = message.data.IN_TIPO_TRANSFORMACAO === ''
+            ? null
+            : message.data.IN_TIPO_TRANSFORMACAO;
           // Monta payload para validaÃ§Ã£o
           const body = {
             p_id_tipo_codigo: message.data.ID_TIPO_CODIGO,
             p_id_banco_externo: message.data.ID_BANCO_EXTERNO,
-            p_sn_modo_compatibilidade: message.data.SN_MODO_COMPATIBILIDADE,
+            p_sn_modo_compatibilidade: snModoCompatibilidade,
             p_id_banco_esquema: message.data.ID_BANCO_ESQUEMA,
             p_tx_codigo: toStringSafe(message.data.TX_CODIGO)
           };
