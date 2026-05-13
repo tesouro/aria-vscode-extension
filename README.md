@@ -128,3 +128,25 @@ No VS Code, configure as opções em `settings.json`:
 - `.aria-edit/` — Arquivos temporários de edição.
 - `package.json` — Metadados e comandos da extensão.
 - `tsconfig.json` — Configuração TypeScript.
+
+## Guardrails e Segurança
+
+A extensão aplica uma camada de guardrails (regras de segurança e validação) para controlar o comportamento do agente conversacional e proteger dados sensíveis. Esses guardrails são injetados em pontos específicos do fluxo:
+
+- **Pre-check (Ingress/Command Handler):** validação do input do usuário antes de qualquer processamento (detecção de PII, palavras proibidas, formato inválido).
+- **Prompt Assembly / System Message:** instruções de segurança e proibições são adicionadas ao `system` prompt enviado ao modelo (veja `src/extension.ts`).
+- **Model Call Wrapper:** parâmetros de chamada ao LLM (`temperature`, `max_tokens`, `stop_sequences`) e tokens de safety são aplicados no wrapper que invoca o modelo.
+- **Function Calling / Schema:** quando aplicável, usamos JSON Schema / function-calling para forçar formatos de saída estritos.
+- **Tool Invocation Layer:** todas as chamadas a ferramentas (`aria_*`) passam por um invoker que valida permissões, aplica rate-limits e evita chamadas não-autorizadas.
+- **Moderation Check:** checagem de conteúdo (por exemplo: sexualidade, ódio, violência, PII) antes de publicar qualquer texto ao usuário.
+- **Output Validation / Post-check:** validação da resposta (AJV/JSON Schema, regex) e sanitização/redação quando necessário.
+- **Policy Enforcement / Escalonamento:** decisões de bloqueio, sanitização ou escalonamento humano são centralizadas em `enforcePolicy`.
+- **Logging & Audit:** registros redigidos de inputs, prompts, respostas e decisões são gravados para auditoria.
+
+Boas práticas:
+- Mantenha `deny-by-default` para ferramentas sensíveis.
+- Forneça schemas JSON para respostas críticas.
+- Redija PII antes de armazenar logs.
+- Habilite revisão humana para ações de alto risco.
+
+Se quiser um exemplo de configuração de guardrails (YAML/JSON) ou inserir um snippet diretamente em `src/extension.ts`, eu posso adicionar isso ao repositório.
