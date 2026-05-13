@@ -1,0 +1,6 @@
+{
+  "timestamp": "2026-05-13T14:21:19.596+00:00",
+  "status": 500,
+  "error": "Internal Server Error",
+  "path": "/dicionario/metadados"
+}

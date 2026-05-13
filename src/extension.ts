@@ -96,6 +96,42 @@ type AriaLovs = {
   SISTEMA?: Array<{ ID_SISTEMA: number; CO_SISTEMA: number }>;
 };
 
+interface ParsedMetadataForeignKey {
+  column: string;
+  targetSchema: string;
+  targetTable: string;
+  targetColumn: string;
+  raw: string;
+}
+
+interface ParsedMetadataColumn {
+  name: string;
+  type: string;
+  comment?: string;
+  raw: string;
+}
+
+interface ParsedMetadataTable {
+  schema: string;
+  name: string;
+  fullName: string;
+  comment?: string;
+  columns: ParsedMetadataColumn[];
+  foreignKeys: ParsedMetadataForeignKey[];
+}
+
+interface ParsedMetadataSchema {
+  name: string;
+  tables: ParsedMetadataTable[];
+}
+
+interface ParsedMetadataCatalog {
+  key: string;
+  filePath?: string;
+  markdown: string;
+  schemas: ParsedMetadataSchema[];
+}
+
 interface ApiSettings {
   baseUrl: string;
   fetchProjectPath: string;
@@ -621,6 +657,23 @@ function extractSqlReferencedTables(sqlCode: string): string[] {
   return Array.from(tables);
 }
 
+function normalizeTableRef(tableRef: string): string {
+  return toStringSafe(tableRef)
+    .trim()
+    .replace(/^"|"$/g, '')
+    .replace(/^\[|\]$/g, '')
+    .toUpperCase();
+}
+
+function tableRefNameOnly(tableRef: string): string {
+  const normalized = normalizeTableRef(tableRef);
+  if (!normalized) {
+    return '';
+  }
+  const parts = normalized.split('.').filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : normalized;
+}
+
 function hasSelectStarInText(text: string): boolean {
   return /\bselect\s+(?:distinct\s+)?(?:\*|[a-zA-Z_][\w$]*\s*\.\s*\*)\b/i.test(text);
 }
@@ -637,6 +690,28 @@ function isAffirmativeConfirmationPrompt(prompt: string): boolean {
   }
 
   return /^(sim|s|ok|pode|pode sim|confirmo|confirmado|prosseguir|continue|segue|yes)\b/.test(normalized);
+}
+
+function isEndpointProposalCompleteForConfirmation(text: string): boolean {
+  const normalized = toStringSafe(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (!normalized.trim()) {
+    return false;
+  }
+
+  const hasName = /(nome do endpoint|no_rest_custom|nome:)/.test(normalized);
+  const hasPath = /(caminho|tx_path|path:)/.test(normalized);
+  const hasMethod = /(metodo|id_metodo|http)/.test(normalized);
+  const hasCodeType = /(tipo de codigo|id_tipo_codigo|linguagem|sql|plsql|python)/.test(normalized);
+  const hasBank = /(banco externo|id_banco_externo|banco:)/.test(normalized);
+  const hasSchema = /(esquema|id_banco_esquema|schema)/.test(normalized);
+  const hasDescription = /(ds_rest_custom_curta|descricao curta|tx_comentarios|comentarios)/.test(normalized);
+  const hasConfirmationAsk = /(confirma|confirmacao|deseja prosseguir|posso prosseguir|pode criar|pode prosseguir)/.test(normalized);
+
+  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk;
 }
 
 function resolveCodeTypeSelection(
@@ -760,6 +835,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let isLoggedIn = false;
   const editMap = new Map<string, EditMarker>();
   const metadataUriByEndpoint = new Map<string, vscode.Uri>();
+  const metadataCatalogByEndpoint = new Map<string, ParsedMetadataCatalog>();
   const output = vscode.window.createOutputChannel('ARIA API Editor');
 
   const tree = new AriaTreeProvider(() => dataset);
@@ -776,6 +852,31 @@ export function activate(context: vscode.ExtensionContext): void {
       throw new Error('Sem conexao ativa com a API.');
     }
     return client;
+  };
+
+  const getMetadataCatalog = async (
+    idBancoExterno: number,
+    idBancoEsquema?: number
+  ): Promise<ParsedMetadataCatalog | undefined> => {
+    const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
+    const cached = metadataCatalogByEndpoint.get(metadataKey);
+    if (cached) {
+      return cached;
+    }
+
+    const uri = metadataUriByEndpoint.get(metadataKey);
+    if (!uri) {
+      return undefined;
+    }
+
+    try {
+      const markdown = await fs.promises.readFile(uri.fsPath, 'utf8');
+      const catalog = parseMetadataMarkdown(markdown, uri.fsPath, metadataKey);
+      metadataCatalogByEndpoint.set(metadataKey, catalog);
+      return catalog;
+    } catch {
+      return undefined;
+    }
   };
 
   const isValidateCodeSuccess = (status: unknown): boolean => {
@@ -1582,35 +1683,21 @@ export function activate(context: vscode.ExtensionContext): void {
           await fs.promises.mkdir(metadataDir, { recursive: true });
           await fs.promises.writeFile(filePath, metadata, 'utf8');
           metadataUriByEndpoint.set(metadataKey, vscode.Uri.file(filePath));
+          metadataCatalogByEndpoint.set(metadataKey, parseMetadataMarkdown(metadata, filePath, metadataKey));
 
           const schemas = listMetadataSchemas(metadata);
-          const tables = extractMetadataTableNames(metadata);
-          const rankedTables = rankMetadataTables(tables, {
-            preferredSchema: schemaPreferido,
-            searchTerms: termosBusca
-          });
-
-          const rankedPreview = rankedTables.slice(0, 40).map((item) => `- ${item.table} (score=${item.score})`).join('\n');
-          const lines = metadata.split('\n');
-          const preview = lines.slice(0, 60).join('\n');
-          const extra = lines.length > 120
-            ? `\n... (${lines.length - 120} linhas adicionais salvas em ${filePath})`
-            : '';
-
-          const rankingIntro = rankedTables.length > 0
-            ? `Tabelas candidatas (ranqueadas por schema/termos):\n${rankedPreview}\n\n`
-            : 'Nenhuma tabela encontrada para ranqueamento.\n\n';
-
           const schemaSummary = schemas.length > 0
-            ? `Schemas detectados: ${schemas.join(', ')}\n\n`
-            : 'Schemas detectados: nenhum\n\n';
+            ? schemas.map((schema) => `- ${schema}`).join('\n')
+            : '(nenhum schema detectado)';
 
           return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(
               `Metadados salvos em: ${filePath}\n\n` +
-              schemaSummary +
-              rankingIntro +
-              `Trecho inicial do catalogo:\n${preview}${extra}`
+              'Resumo (nivel 1 - schemas):\n' +
+              `${schemaSummary}\n\n` +
+              'Proximo passo obrigatorio (nivel 2): chame aria_obter_tabelas_metadados para o schema escolhido.\n' +
+              'Depois (nivel 3): chame aria_obter_colunas_metadados para cada tabela selecionada.\n' +
+              'Nao escreva SQL antes de concluir os niveis 2 e 3.'
             )
           ]);
         } catch (error) {
@@ -1618,6 +1705,149 @@ export function activate(context: vscode.ExtensionContext): void {
             new vscode.LanguageModelTextPart(`Erro ao obter metadados: ${toErrorMessage(error)}`)
           ]);
         }
+      }
+    }),
+
+    // Tool: listar esquemas do catalogo em memoria
+    vscode.lm.registerTool<{
+      p_id_banco_externo: number;
+      p_id_banco_esquema?: number;
+    }>('aria_obter_esquemas_metadados', {
+      async invoke(options, _token) {
+        if (!client) { return notConnectedResult(); }
+        const idBancoExterno = Number(options.input.p_id_banco_externo);
+        const idBancoEsquema = Number(options.input.p_id_banco_esquema);
+        if (!(idBancoExterno > 0)) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Parametro invalido: p_id_banco_externo deve ser um numero maior que zero.')
+          ]);
+        }
+
+        const catalog = await getMetadataCatalog(idBancoExterno, idBancoEsquema);
+        if (!catalog) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Nenhum metadado em memoria para os parametros informados. Execute aria_obter_metadados primeiro.')
+          ]);
+        }
+
+        const schemas = catalog.schemas.map((schema) => ({
+          schema: schema.name,
+          tableCount: schema.tables.length,
+          tables: schema.tables.map((table) => table.fullName)
+        }));
+
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(JSON.stringify({
+            metadataKey: catalog.key,
+            schemas
+          }, null, 2))
+        ]);
+      }
+    }),
+
+    // Tool: listar tabelas de um schema do catalogo em memoria
+    vscode.lm.registerTool<{
+      p_id_banco_externo: number;
+      p_id_banco_esquema?: number;
+      schema?: string;
+    }>('aria_obter_tabelas_metadados', {
+      async invoke(options, _token) {
+        if (!client) { return notConnectedResult(); }
+        const idBancoExterno = Number(options.input.p_id_banco_externo);
+        const idBancoEsquema = Number(options.input.p_id_banco_esquema);
+        const schemaFilter = toStringSafe(options.input.schema).trim().toUpperCase();
+        if (!(idBancoExterno > 0)) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Parametro invalido: p_id_banco_externo deve ser um numero maior que zero.')
+          ]);
+        }
+
+        const catalog = await getMetadataCatalog(idBancoExterno, idBancoEsquema);
+        if (!catalog) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Nenhum metadado em memoria para os parametros informados. Execute aria_obter_metadados primeiro.')
+          ]);
+        }
+
+        const tables = catalog.schemas.flatMap((schema) => {
+          if (schemaFilter && schema.name.toUpperCase() !== schemaFilter) {
+            return [];
+          }
+          return schema.tables.map((table) => ({
+            schema: schema.name,
+            table: table.fullName,
+            comment: table.comment ?? '',
+            columnCount: table.columns.length,
+            foreignKeyCount: table.foreignKeys.length
+          }));
+        });
+
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(JSON.stringify({
+            metadataKey: catalog.key,
+            schema: schemaFilter || null,
+            tables
+          }, null, 2))
+        ]);
+      }
+    }),
+
+    // Tool: listar colunas e FKs de uma tabela do catalogo em memoria
+    vscode.lm.registerTool<{
+      p_id_banco_externo: number;
+      p_id_banco_esquema?: number;
+      schema?: string;
+      tabela: string;
+    }>('aria_obter_colunas_metadados', {
+      async invoke(options, _token) {
+        if (!client) { return notConnectedResult(); }
+        const idBancoExterno = Number(options.input.p_id_banco_externo);
+        const idBancoEsquema = Number(options.input.p_id_banco_esquema);
+        const schemaFilter = toStringSafe(options.input.schema).trim().toUpperCase();
+        const tableFilter = toStringSafe(options.input.tabela).trim().toUpperCase();
+        if (!(idBancoExterno > 0) || !tableFilter) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Parametro invalido: informe p_id_banco_externo e tabela.')
+          ]);
+        }
+
+        const catalog = await getMetadataCatalog(idBancoExterno, idBancoEsquema);
+        if (!catalog) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart('Nenhum metadado em memoria para os parametros informados. Execute aria_obter_metadados primeiro.')
+          ]);
+        }
+
+        const candidates = catalog.schemas.flatMap((schema) => {
+          if (schemaFilter && schema.name.toUpperCase() !== schemaFilter) {
+            return [];
+          }
+
+          return schema.tables
+            .filter((table) => table.fullName.toUpperCase() === tableFilter || table.name.toUpperCase() === tableFilter)
+            .map((table) => ({
+              schema: schema.name,
+              table: table.fullName,
+              comment: table.comment ?? '',
+              columns: table.columns,
+              foreignKeys: table.foreignKeys
+            }));
+        });
+
+        if (candidates.length === 0) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`Tabela nao encontrada no catalogo em memoria: ${schemaFilter ? `${schemaFilter}.` : ''}${tableFilter}`)
+          ]);
+        }
+
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(JSON.stringify({
+            metadataKey: catalog.key,
+            requestedSchema: schemaFilter || null,
+            requestedTable: tableFilter,
+            tables: candidates
+          }, null, 2))
+        ]);
       }
     }),
 
@@ -1918,10 +2148,30 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Busca projetos-endpoints e envia como contexto inicial para o modelo
     let projetosJson = '[]';
+    const knownSchemaIds = new Set<number>();
+    const knownSchemaNames = new Set<string>();
+    let schemaLockText = '';
     try {
       response.progress('Carregando contexto de projetos...');
       const projetosData = await client.getProjectEndpointTree();
       projetosJson = JSON.stringify(projetosData.registros, null, 2);
+      schemaLockText = buildProjectSchemaLockSummary(projetosData.registros, request.prompt);
+
+      for (const project of projetosData.registros ?? []) {
+        for (const endpoint of project.REST_CUSTOM ?? []) {
+          const schemaId = toNumber(endpoint.ID_BANCO_ESQUEMA);
+          if (schemaId > 0) {
+            knownSchemaIds.add(schemaId);
+          }
+
+          const schemaName = toStringSafe(endpoint.NO_ESQUEMA ?? endpoint.no_esquema ?? endpoint.CO_ESQUEMA ?? endpoint.co_esquema)
+            .trim()
+            .toUpperCase();
+          if (schemaName) {
+            knownSchemaNames.add(schemaName);
+          }
+        }
+      }
     } catch (error) {
       projetosJson = `Erro ao carregar projetos: ${toErrorMessage(error)}`;
     }
@@ -1930,101 +2180,140 @@ export function activate(context: vscode.ExtensionContext): void {
 
     const systemPrompt = [
       'Voce e um assistente especialista na plataforma ARIA (endpoints REST sobre bancos Oracle).',
-      'O codigo da extensao NAO detecta projetos nem endpoints automaticamente. Quem identifica e VOCE, com base no contexto fornecido.',
+      'O codigo da extensao NAO detecta projetos nem endpoints automaticamente.',
+      'Voce identifica projeto, banco, esquema, tabelas e colunas EXCLUSIVAMENTE pelo contexto e pelos dados retornados pelas tools.',
       '',
-      '## FLUXO OBRIGATORIO PARA QUALQUER SOLICITACAO:',
+      '════════════════════════════════════════',
+      '## FLUXO OBRIGATORIO — execute nesta ordem exata:',
+      '════════════════════════════════════════',
       '',
-      '1. Os projetos e endpoints ja estao no contexto desta mensagem (de /projetos-endpoints).',
-      '   Identifique o projeto pelo nome ou pelo contexto da mensagem do usuario.',
-      '   - Se nao conseguir identificar o projeto, PERGUNTE ao usuario qual e o nome do projeto.',
-      '   - O ID do projeto e identificado por voce com base no contexto — nao ha codigo automatico para isso.',
+      '1. IDENTIFICAR PROJETO',
+      '   - Os projetos e endpoints ja estao no contexto (de /projetos-endpoints).',
+      '   - Identifique pelo nome ou contexto. Se ambiguo, pergunte ao usuario.',
       '',
-      '2. Com o ID do projeto, chame aria_obter_lovs(id_projeto).',
-      '   - As LOVs contem os valores validos para: ID_METODO, ID_TIPO_CODIGO, ID_TIPO_HEADER,',
-      '     ID_BANCO_EXTERNO (com seus esquemas em BANCO_ESQUEMA[]), perfis, OTPs, etc.',
-      '   - Use-as para preencher corretamente os campos ID_ e NO_ no JSON do endpoint.',
+      '2. CARREGAR LOVs: aria_obter_lovs(id_projeto)',
+      '   - Fornece valores validos para ID_METODO, ID_TIPO_CODIGO, ID_TIPO_HEADER, ID_BANCO_EXTERNO (e seus esquemas), perfis, OTPs etc.',
+      '   - Use-as para preencher todos os campos ID_ e NO_ do endpoint.',
       '',
-      '3. Chame aria_obter_json_projeto(id_projeto) para obter o JSON completo do projeto.',
-      '   - REST_CUSTOM_JSON_SCHEMA ja e removido automaticamente antes de chegar ao modelo.',
-      '   - Use os endpoints existentes para entender o padrao de banco/esquema do projeto.',
+      '3. CARREGAR JSON DO PROJETO: aria_obter_json_projeto(id_projeto)',
+      '   - Use para entender o padrao de banco/esquema dos endpoints existentes do projeto.',
       '',
-      '4. Chame aria_obter_itens_apex() para saber quais campos sao obrigatorios.',
+      '4. CARREGAR CAMPOS OBRIGATORIOS: aria_obter_itens_apex()',
       '',
-      '## PARA CRIAR ENDPOINT:',
+      '5. DECIDIR BANCO E ESQUEMA',
+      '   - ID_BANCO_EXTERNO: deduzido das LOVs e dos endpoints existentes do projeto.',
+      '   - ID_BANCO_ESQUEMA: OPCIONAL. So preencha se houver evidencia clara (endpoints existentes do projeto ja usam esse esquema, ou usuario pediu explicitamente).',
+      '   - Se nao houver evidencia, omita ID_BANCO_ESQUEMA — NAO use fallback fixo.',
       '',
-      'ANTES DE PERGUNTAR QUALQUER COISA, TENTE DEDUZIR PELO CONTEXTO DO PROJETO:',
-      '   - Nao faca perguntas sobre campos que podem ser inferidos de endpoints existentes, LOVs e metadados.',
-      '   - Para pedido generico (ex: "crie endpoint de metodos"), assuma defaults sensatos:',
-      '     NO_REST_CUSTOM derivado do assunto, TX_PATH em slug, ID_METODO=GET, ID_TIPO_CODIGO=SQL.',
-      '   - Banco/esquema deve seguir o padrao do proprio projeto; se projeto nao usa esquema, mantenha sem esquema.',
-      '   - Gere primeiro uma proposta completa de endpoint e so pergunte se houver bloqueio real.',
-      '   - Se precisar perguntar, faca no maximo 1 pergunta objetiva por vez (nao listar questionario longo).',
+      '6. CARREGAR METADADOS: aria_obter_metadados(p_id_banco_externo [, p_id_banco_esquema, schema_preferido, termos_busca])',
+      '   - OBRIGATORIO antes de qualquer proposta de SQL.',
+      '   - Informe termos_busca com palavras-chave do assunto do endpoint para ajudar no ranking de tabelas.',
+      '   - Se o projeto usa schema especifico, informe schema_preferido.',
+      '   - Apos carregar metadados, va DIRETO para a inferencia hierarquica de schema -> tabela -> colunas/FKs e so entao para a proposta completa.',
+      '   - NAO emita mensagem intermediaria como "metadados carregados" ou "agora posso propor".',
+      '   - Fluxo correto: executa tools silenciosamente -> apresenta proposta completa ao usuario.',
+      '   - Se o schema ainda estiver incerto, use aria_obter_esquemas_metadados para listar os schemas em memoria.',
+      '   - Depois use aria_obter_tabelas_metadados para listar as tabelas do schema escolhido.',
+      '   - Por fim use aria_obter_colunas_metadados para confirmar colunas e FKs da tabela escolhida.',
+      '   - Nunca pule do catalogo bruto direto para o SQL se houver duvida de schema/tabela.',
       '',
-      '5. Decida qual ID_BANCO_EXTERNO usar e, somente se fizer sentido, ID_BANCO_ESQUEMA:',
-      '   - ID_BANCO_ESQUEMA e OPCIONAL.',
-      '   - Primeiro observe os endpoints existentes do mesmo projeto (passo 3).',
-      '   - Se os endpoints do projeto nao usam esquema (vazio/nulo), NAO invente esquema e mantenha sem esquema.',
-      '   - So preencha esquema quando houver evidencias no proprio projeto ou pedido explicito do usuario.',
-      '   - Se houver duvida, PERGUNTE ao usuario mostrando as opcoes das LOVs.',
+      '════════════════════════════════════════',
+      '## COMO LER O ARQUIVO DE METADADOS',
+      '════════════════════════════════════════',
       '',
-      '6. Para criar/editar endpoint, chame aria_obter_metadados SEMPRE antes de concluir a proposta.',
-      '   - Exemplo sem esquema: aria_obter_metadados({"p_id_banco_externo": 1}).',
-      '   - Exemplo com esquema: aria_obter_metadados({"p_id_banco_externo": 1, "p_id_banco_esquema": 301}).',
-      '   - Para escolher tabela melhor, informe termos_busca e schema_preferido quando tiver contexto.',
-      '   - Exemplo: aria_obter_metadados({"p_id_banco_externo": 1, "schema_preferido": "MEU_ESQUEMA_PREFERIDO", "termos_busca": ["metodo", "metodos"]}).',
-      '   - O catalogo de metadados sera salvo em arquivo e referenciado no chat.',
-      '   - Essa chamada e OBRIGATORIA em toda criacao/edicao de endpoint (inclusive antes de qualquer proposta preliminar).',
-      '   - Use-o para descobrir tabelas e colunas reais.',
-      '   - NUNCA invente tabelas, colunas ou schemas.',
-      '   - Se existir tabela com match exato no schema preferido (ex: MEU_ESQUEMA_PREFERIDO.MINHA_TABELA), ela tem prioridade sobre tabelas de outros schemas.',
+      'O arquivo retornado e Markdown estruturado hierarquicamente:',
       '',
-      '7. Decida o tipo do endpoint: SQL, PL/SQL ou Python.',
-      '   - Escreva o TX_CODIGO completo e funcional com base nos metadados reais.',
-      '   - Se ID_TIPO_CODIGO/NO_TIPO_CODIGO indicar SQL: NUNCA use "select *".',
-      '   - Para SQL, liste colunas explicitamente (ex: select coluna1, coluna2 ...).',
-      '   - Para SQL, use aliases mnemônicos em todas as colunas para JSON (ex: COLUNA_BANCO as "nomeCampoJson").',
-      '   - Documente SEMPRE: DS_REST_CUSTOM_CURTA (descricao curta obrigatoria), TX_COMENTARIOS.',
-      '   - Se houver variaveis/parametros, preencha o array VARIABLE com TX_DESCRICAO em cada item.',
+      '  # NOME_SCHEMA',
+      '      Inicia um bloco de schema. Todas as tabelas seguintes pertencem a este schema ate o proximo #.',
       '',
-      '8. Monte o JSON do projeto contendo APENAS o endpoint novo na lista REST_CUSTOM.',
-      '   - Siga o JSON Schema fornecido abaixo para garantir estrutura correta.',
-      '   - Mantenha TODOS os campos do projeto no objeto raiz do projeto (nao envie apenas ID_PROJETO).',
-      '   - TX_PATH do projeto e obrigatorio e deve vir do gerar-json do proprio projeto.',
-      '   - TX_PATH NUNCA comeca com barra (/).',
-      '   - ID_REST_CUSTOM deve ser 0 (zero) para endpoints novos.',
-      '   - ID_PROJETO deve ser preenchido com o ID correto do projeto.',
-      '   - PROJETO deve ser um array com um objeto contendo TX_PATH do projeto e CO_SISTEMA.',
-      '   - Campos de arrays nao usados devem ser arrays vazios [].',
+      '  ## SCHEMA.NOME_TABELA  [comentario opcional da tabela]',
+      '      Define uma tabela. As linhas seguintes sao as colunas DESTA tabela ate o proximo ##.',
       '',
-      '9. Mostre o JSON ao usuario e peca confirmacao explicita antes de salvar.',
-      '   - Faca isso em UMA unica proposta objetiva (nome, caminho, metodo, linguagem, banco/esquema e SQL).',
-      '   - Nao repita pedidos de confirmacao para a mesma operacao.',
+      '  - NOME_COLUNA TIPO_DADO  [comentario opcional da coluna]',
+      '      Define uma coluna da tabela atual. NOME_COLUNA e o nome exato a ser usado em SQL.',
       '',
-      '10. Chame aria_importar_json com: { "registros": [<json_do_projeto_com_apenas_o_endpoint_novo_em_REST_CUSTOM>] }',
-      '    - Esse json_do_projeto deve ser o projeto completo (campos completos do projeto + REST_CUSTOM com apenas o endpoint alvo).',
-      '    - Se o usuario respondeu com confirmacao (ex: "sim", "confirmo"), execute direto sem nova pergunta.',
+      '  - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
+      '      Define uma chave estrangeira da tabela atual.',
       '',
-      '## PARA EDITAR ENDPOINT:',
+      'REGRAS DE INTERPRETACAO:',
+      '  - Hierarquia obrigatoria: schema (#) > tabela (##) > colunas/FKs (-).',
+      '  - Uma coluna pertence SOMENTE a tabela do ultimo ## lido antes dela.',
+      '  - NUNCA atribua coluna a tabela diferente da que ela esta listada.',
+      '  - Se o contexto do projeto trouxer um SCHEMA LOCK, ele e a verdade local para esse pedido.',
+      '  - NUNCA use tabela de outro schema quando o SCHEMA LOCK apontar um schema diferente.',
       '',
-      '5. Identifique o endpoint no JSON do projeto (passo 3).',
-      '6. Se houver alteracao SQL, chame aria_obter_metadados antes de propor o novo TX_CODIGO.',
-      '7. Faca as alteracoes solicitadas.',
-      '8. Monte o JSON do projeto contendo APENAS o endpoint editado em REST_CUSTOM.',
-      '   - Preserve os demais campos do projeto (especialmente TX_PATH do projeto).',
-      '9. Mostre as alteracoes e peca confirmacao explicita.',
-      '10. Chame aria_importar_json.',
+      '════════════════════════════════════════',
+      '## COMO ESCOLHER TABELA E ESCREVER SQL',
+      '════════════════════════════════════════',
       '',
-      '## REGRAS ABSOLUTAS:',
-      '- NUNCA invente tabela, coluna ou schema que nao aparece nos metadados.',
-      '- NUNCA proponha SQL sem antes carregar metadados com aria_obter_metadados para o banco/esquema do endpoint.',
-      '- NUNCA escolha tabela de outro schema se houver match exato no schema preferido do projeto.',
-      '- Para SQL, e proibido usar select *; sempre explicite colunas e aliases mnemônicos.',
-      '- SEMPRE documente em DS_REST_CUSTOM_CURTA, TX_COMENTARIOS e VARIABLE[].TX_DESCRICAO.',
+      'SELECAO DE TABELA — siga esta ordem de prioridade:',
+      '  1. Match exato do nome da tabela com o assunto pedido (ex: pedido "metodos" -> tabela METODO ou METODOS).',
+      '  2. Se houver schema_preferido, priorize tabelas nesse schema.',
+      '  3. Se nao encontrar match exato e houver mais de uma candidata plausivel, PARE e pergunte ao usuario qual tabela usar.',
+      '  4. NUNCA escolha tabela por aproximacao semantica fraca sem confirmar com o usuario.',
+      '',
+      'SELECAO DE COLUNAS — regras absolutas:',
+      '  - Use SOMENTE colunas listadas no bloco ## da tabela escolhida.',
+      '  - Verifique o nome exato de cada coluna no arquivo antes de usa-la.',
+      '  - NUNCA invente coluna por semelhanca com o nome da tabela ou semantica (ex: se nao existe ds_metodo na tabela, nao use).',
+      '  - Se a tabela nao tiver colunas suficientes para o pedido, diga ao usuario o que esta faltando.',
+      '',
+      'JOINS — regra unica:',
+      '  - JOIN so e permitido quando houver uma FK explicita no arquivo ligando as duas tabelas.',
+      '  - Formato do FK: - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
+      '  - Se nao houver FK declarada entre as tabelas, NAO faca JOIN. Explique a limitacao ao usuario.',
+      '  - Nunca assuma relacionamento por semelhanca de nome de coluna.',
+      '',
+      'ESCRITA DO SQL — REGRAS INVIOLAVEIS:',
+      '  !! PROIBIDO: SELECT * ou SELECT tabela.* em qualquer situacao. Sem excecao.',
+      '  - Liste TODAS as colunas do SELECT de forma explicita: SCHEMA.TABELA.COLUNA as "alias".',
+      '  - O alias SERA o nome do campo no JSON de resposta da API. Use nomes claros em camelCase.',
+      '     Exemplo: m.ID_MICRO as "idMicro", m.NO_MICRO as "nomeMicro"',
+      '  - Use o nome qualificado SCHEMA.TABELA nas clausulas FROM/JOIN.',
+      '  - Nao inclua coluna cuja existencia voce nao confirmou no bloco ## da tabela nos metadados.',
+      '',
+      '════════════════════════════════════════',
+      '## PARA CRIAR ENDPOINT',
+      '════════════════════════════════════════',
+      '',
+      '- Deduza o maximo do contexto (endpoints existentes, LOVs, metadados) antes de perguntar qualquer coisa.',
+      '- Defaults sensiveis: NO_REST_CUSTOM derivado do assunto, TX_PATH em slug lowercase, ID_METODO=GET, ID_TIPO_CODIGO=SQL.',
+      '- Se precisar perguntar, faca 1 pergunta objetiva por vez — nunca questionario.',
+      '- Monte proposta completa de uma vez (nome, caminho, metodo, banco/esquema, SQL, descricao).',
+      '- Resposta invalida: retornar apenas SQL sem os demais campos do endpoint para confirmacao.',
+      '- Peca confirmacao 1 vez. Apos resposta afirmativa, execute sem nova confirmacao.',
+      '',
+      'JSON do endpoint:',
+      '  - ID_REST_CUSTOM = 0 para endpoint novo.',
+      '  - Inclua o projeto completo (todos os campos) no objeto raiz; nao envie apenas ID_PROJETO.',
+      '  - TX_PATH do projeto vem do gerar-json; NUNCA comeca com /.',
+      '  - PROJETO = array com { TX_PATH, CO_SISTEMA }.',
+      '  - Arrays nao usados = [].',
+      '',
+      '  Chame: aria_importar_json({ "registros": [<projeto_completo_com_apenas_o_endpoint_em_REST_CUSTOM>] })',
+      '',
+      '════════════════════════════════════════',
+      '## PARA EDITAR ENDPOINT',
+      '════════════════════════════════════════',
+      '',
+      '- Identifique o endpoint pelo JSON do projeto (passo 3).',
+      '- Se houver mudanca de SQL, execute aria_obter_metadados antes da proposta.',
+      '- Monte JSON com o projeto completo e apenas o endpoint editado em REST_CUSTOM.',
+      '- Mostre alteracoes, peca confirmacao 1 vez, execute.',
+      '',
+      '════════════════════════════════════════',
+      '## REGRAS ABSOLUTAS',
+      '════════════════════════════════════════',
+      '',
+      '- NUNCA invente tabela, coluna, schema ou FK que nao existam no arquivo de metadados.',
+      '- NUNCA faca JOIN sem FK declarada no arquivo de metadados entre as tabelas envolvidas.',
+      '- NUNCA use SELECT * ou SELECT tabela.*. Sempre liste colunas com alias camelCase.',
+      '- NUNCA emita mensagem intermediaria entre chamadas de tools e a proposta final ao usuario.',
+      '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
       '- NUNCA chame aria_importar_json sem confirmacao explicita do usuario.',
-      '- Peca confirmacao somente uma vez por operacao; apos resposta afirmativa, execute sem novas confirmacoes.',
-      '- NUNCA faca questionario pedindo todos os campos; deduza o maximo possivel e pergunte apenas o indispensavel.',
-      '- Se uma tool retornar erro, nao repita com os mesmos parametros. Informe o erro ao usuario.',
-      '- Seja direto: minimo de chamadas de tools para resolver o que foi pedido.',
+      '- NUNCA faca questionario; deduza e pergunte apenas o indispensavel.',
+      '- Se uma tool retornar erro, nao repita com os mesmos parametros; informe o usuario.',
+      '- Documente sempre: DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, VARIABLE[].TX_DESCRICAO.',
       '',
       '## JSON SCHEMA DO REST_CUSTOM:',
       REST_CUSTOM_SCHEMA_STR
@@ -2036,6 +2325,10 @@ export function activate(context: vscode.ExtensionContext): void {
         `CONTEXTO - Projetos e endpoints disponiveis (de /projetos-endpoints):\n${projetosJson}`
       )
     ];
+
+    if (schemaLockText) {
+      messages.push(vscode.LanguageModelChatMessage.User(schemaLockText));
+    }
 
     // Adiciona historico da conversa
     for (const turn of chatContext.history) {
@@ -2064,17 +2357,181 @@ export function activate(context: vscode.ExtensionContext): void {
     })();
 
     const isAffirmativeReply = isAffirmativeConfirmationPrompt(request.prompt);
+    const userPromptHistory = [
+      ...chatContext.history
+        .filter((turn): turn is vscode.ChatRequestTurn => turn instanceof vscode.ChatRequestTurn)
+        .map((turn) => toStringSafe(turn.prompt)),
+      toStringSafe(request.prompt)
+    ].join('\n').toLowerCase();
 
     let metadataCalledInRequest = false;
+    let metadataSchemasListedInRequest = false;
+    let metadataTablesListedInRequest = false;
+    let metadataColumnsListedInRequest = false;
+    const columnMetadataRequestedTables = new Set<string>();
 
     output.appendLine(
       `[${new Date().toISOString()}] @aria: "${request.prompt.slice(0, 120)}", ${messages.length} msgs, ${ariaTools.length} tools`
     );
 
+    // Short-circuit: se o usuario respondeu afirmativamente ("Sim") em fluxo de criacao/edicao
+    // tentamos extrair o JSON do projeto/endpoint da ultima resposta do assistente e executar o import.
+    if (isEndpointMutationIntent && isAffirmativeReply) {
+      output.appendLine(`[${new Date().toISOString()}] @aria: affirmative reply detected - attempting immediate import.`);
+
+      const assistantTexts: string[] = [];
+      for (const turn of chatContext.history) {
+        if (turn instanceof vscode.ChatResponseTurn) {
+          const text = turn.response
+            .filter((p): p is vscode.ChatResponseMarkdownPart => p instanceof vscode.ChatResponseMarkdownPart)
+            .map((p) => p.value.value)
+            .join('');
+          if (text && text.trim()) {
+            assistantTexts.push(text);
+          }
+        }
+      }
+
+      const tryExtractJsonObject = (text: string): any | undefined => {
+        const firstBrace = text.indexOf('{');
+        if (firstBrace === -1) { return undefined; }
+
+        for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
+          let depth = 0;
+          for (let i = start; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '{') { depth++; }
+            else if (ch === '}') { depth--; if (depth === 0) {
+              const candidate = text.slice(start, i + 1);
+              try {
+                return JSON.parse(candidate);
+              } catch {
+                break;
+              }
+            } }
+          }
+        }
+        return undefined;
+      };
+
+      let found: any | undefined;
+      for (let i = assistantTexts.length - 1; i >= 0 && !found; i--) {
+        const t = assistantTexts[i];
+        // prefer explicit project JSON blocks containing REST_CUSTOM
+        const json = tryExtractJsonObject(t);
+        if (json && (Array.isArray((json as any).REST_CUSTOM) || typeof (json as any).ID_PROJETO === 'number' || Array.isArray((json as any).registros))) {
+          found = json;
+          break;
+        }
+      }
+
+      if (found) {
+        try {
+          output.appendLine(`[${new Date().toISOString()}] @aria: invoking aria_importar_json with extracted JSON.`);
+          const invokeResult = await vscode.lm.invokeTool('aria_importar_json', { input: { json_projeto: found }, toolInvocationToken: request.toolInvocationToken }, token);
+
+          // Try to present the tool result to the user.
+          if (invokeResult && Array.isArray((invokeResult as any).content)) {
+            const parts = (invokeResult as any).content;
+            const joined = parts
+              .map((p: any) => (p && typeof p.value === 'string') ? p.value : (p && p.value && p.value.value ? p.value.value : ''))
+              .filter((s: string) => !!s)
+              .join('\n');
+            response.markdown(joined || 'Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
+          } else {
+            response.markdown('Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
+          }
+        } catch (err) {
+          output.appendLine(`[${new Date().toISOString()}] @aria: aria_importar_json failed: ${toErrorMessage(err)}`);
+          response.markdown(`Falha ao executar importacao automaticamente: ${toErrorMessage(err)}. Por favor, cole o JSON do projeto para eu tentar novamente.`);
+        }
+
+        return; // finaliza participante apos tentativa de importacao
+      }
+
+      // Se nao encontramos JSON, pedimos ao modelo (SEM TOOLS) que gere APENAS o JSON
+      // completo do projeto para importar. Isso evita que o modelo reexucute o pipeline
+      // de metadados repetidamente.
+      try {
+        const askJson = 'Por favor, retorne APENAS um objeto JSON válido contendo o projeto completo pronto para importar via importar-json. ' +
+          'O JSON deve ter `ID_PROJETO` e `REST_CUSTOM` (array com o endpoint proposto). Inclua `TX_CODIGO` com a query SQL final. Nao inclua textos explicativos, apenas o JSON.';
+
+        const forcedMessages = [
+          ...messages,
+          vscode.LanguageModelChatMessage.User(askJson)
+        ];
+
+        const forcedResponse = await model.sendRequest(forcedMessages, { tools: [] }, token);
+        let forcedText = '';
+        for await (const chunk of forcedResponse.stream) {
+          if (chunk instanceof vscode.LanguageModelTextPart) {
+            forcedText += chunk.value;
+          }
+        }
+
+        const tryExtractJson = (text: string): any | undefined => {
+          try {
+            // Try code fence JSON first
+            const fenceMatch = text.match(/```json\s*([\s\S]*?)```/i);
+            const candidate = fenceMatch ? fenceMatch[1] : text;
+            // find first {..} balanced
+            const firstBrace = candidate.indexOf('{');
+            if (firstBrace === -1) { return undefined; }
+            for (let start = candidate.indexOf('{'); start !== -1; start = candidate.indexOf('{', start + 1)) {
+              let depth = 0;
+              for (let i = start; i < candidate.length; i++) {
+                const ch = candidate[i];
+                if (ch === '{') depth++;
+                else if (ch === '}') {
+                  depth--;
+                  if (depth === 0) {
+                    const substr = candidate.slice(start, i + 1);
+                    try { return JSON.parse(substr); } catch { break; }
+                  }
+                }
+              }
+            }
+          } catch {
+            // ignore
+          }
+          return undefined;
+        };
+
+        const extracted = tryExtractJson(forcedText);
+        if (extracted) {
+          output.appendLine(`[${new Date().toISOString()}] @aria: extracted JSON from forced model response, invoking import.`);
+          try {
+            const importRes = await vscode.lm.invokeTool('aria_importar_json', { input: { json_projeto: extracted }, toolInvocationToken: request.toolInvocationToken }, token);
+            if (importRes && Array.isArray((importRes as any).content)) {
+              const parts = (importRes as any).content;
+              const joined = parts
+                .map((p: any) => (p && typeof p.value === 'string') ? p.value : (p && p.value && p.value.value ? p.value.value : ''))
+                .filter((s: string) => !!s)
+                .join('\n');
+              response.markdown(joined || 'Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
+            } else {
+              response.markdown('Importacao executada. Atualize a arvore de projetos para ver os endpoints.');
+            }
+            return;
+          } catch (err) {
+            output.appendLine(`[${new Date().toISOString()}] @aria: aria_importar_json failed after forced model JSON: ${toErrorMessage(err)}`);
+            response.markdown(`Falha ao importar automaticamente: ${toErrorMessage(err)}. Por favor cole o JSON do projeto.`);
+            return;
+          }
+        }
+      } catch (err) {
+        output.appendLine(`[${new Date().toISOString()}] @aria: forced model JSON request failed: ${toErrorMessage(err)}`);
+        response.markdown('Nao foi possivel gerar automaticamente o JSON do endpoint. Por favor cole o JSON do projeto aqui para eu tentar importar.');
+        return;
+      }
+    }
+
+    const toolsForModel = (isEndpointMutationIntent && isAffirmativeReply) ? [] : ariaTools;
+
     for (let iteration = 0; iteration < 10 && !token.isCancellationRequested; iteration++) {
       let chatResponse: vscode.LanguageModelChatResponse;
       try {
-        chatResponse = await model.sendRequest(messages, { tools: ariaTools }, token);
+        chatResponse = await model.sendRequest(messages, { tools: toolsForModel }, token);
       } catch (error) {
         response.markdown(`Erro ao chamar o modelo: ${toErrorMessage(error)}`);
         return;
@@ -2139,6 +2596,64 @@ export function activate(context: vscode.ExtensionContext): void {
           continue;
         }
 
+        if (
+          isEndpointMutationIntent &&
+          metadataCalledInRequest &&
+          (!metadataTablesListedInRequest || !metadataColumnsListedInRequest)
+        ) {
+          output.appendLine(
+            `[${new Date().toISOString()}] Guardrail: resposta bloqueada por pipeline de metadados incompleto (schema->tabela->colunas).`
+          );
+
+          messages.push(vscode.LanguageModelChatMessage.User(
+            'Pipeline obrigatorio para este endpoint: ' +
+            '1) aria_obter_metadados (schemas), ' +
+            '2) aria_obter_tabelas_metadados (schema escolhido), ' +
+            '3) aria_obter_colunas_metadados (tabelas selecionadas). ' +
+            'Nao conclua a proposta sem concluir os 3 niveis.'
+          ));
+          continue;
+        }
+
+        if (isEndpointMutationIntent) {
+          const hasSqlCandidate = /\bselect\b[\s\S]*\bfrom\b/i.test(bufferedTextLower);
+          if (hasSqlCandidate) {
+            const sqlTables = extractSqlReferencedTables(bufferedText)
+              .map((item) => normalizeTableRef(item))
+              .filter((item) => item.length > 0);
+
+            const missingColumnContext = sqlTables.filter((tableRef) => {
+              const nameOnly = tableRefNameOnly(tableRef);
+              return !columnMetadataRequestedTables.has(tableRef) && !columnMetadataRequestedTables.has(nameOnly);
+            });
+
+            if (missingColumnContext.length > 0) {
+              output.appendLine(
+                `[${new Date().toISOString()}] Guardrail: resposta SQL bloqueada por falta de aria_obter_colunas_metadados para tabelas: ${missingColumnContext.join(', ')}`
+              );
+
+              messages.push(vscode.LanguageModelChatMessage.User(
+                'Antes de propor SQL final, chame aria_obter_colunas_metadados para CADA tabela usada em FROM/JOIN e so depois reescreva a query. ' +
+                `Tabelas sem colunas carregadas: ${missingColumnContext.join(', ')}.`
+              ));
+              continue;
+            }
+
+            if (!isEndpointProposalCompleteForConfirmation(bufferedText)) {
+              output.appendLine(
+                `[${new Date().toISOString()}] Guardrail: resposta SQL bloqueada por proposta incompleta (faltam campos do endpoint para confirmacao).`
+              );
+
+              messages.push(vscode.LanguageModelChatMessage.User(
+                'Nao responda apenas com SQL. Reescreva com proposta COMPLETA do endpoint para confirmacao do usuario: ' +
+                'Nome do Endpoint, Caminho (TX_PATH), Metodo HTTP, Tipo de Codigo/Linguagem, Banco Externo, Esquema, ' +
+                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, SQL final e pergunta unica de confirmacao.'
+              ));
+              continue;
+            }
+          }
+        }
+
         if (bufferedText.trim()) {
           response.markdown(bufferedText);
         }
@@ -2152,22 +2667,98 @@ export function activate(context: vscode.ExtensionContext): void {
 
       const toolResults: vscode.LanguageModelToolResultPart[] = [];
       for (const toolCall of toolCalls) {
-        output.appendLine(`[${new Date().toISOString()}] Tool: ${toolCall.name} input: ${summarizeForLog(toolCall.input)}`);
+        let toolInput = (toolCall.input as Record<string, unknown>) ?? {};
+
+        if (toolCall.name === 'aria_obter_metadados') {
+          const requestedSchemaId = toNumber(toolInput.p_id_banco_esquema);
+          const requestedSchemaName = toStringSafe(toolInput.schema_preferido).trim().toUpperCase();
+          const schemaMentionedByUser = requestedSchemaId > 0
+            ? new RegExp(`\\b${requestedSchemaId}\\b`).test(userPromptHistory)
+            : false;
+          const schemaSeenInProjectContext = requestedSchemaId > 0 && knownSchemaIds.has(requestedSchemaId);
+          const schemaNameMentionedByUser = requestedSchemaName.length > 0
+            ? userPromptHistory.includes(requestedSchemaName.toLowerCase())
+            : false;
+          const schemaNameSeenInProjectContext = requestedSchemaName.length > 0
+            ? knownSchemaNames.has(requestedSchemaName)
+            : false;
+          const hasSchemaNameEvidence = schemaNameMentionedByUser || schemaNameSeenInProjectContext;
+
+          if (requestedSchemaId > 0 && !schemaMentionedByUser && !schemaSeenInProjectContext && !hasSchemaNameEvidence) {
+            output.appendLine(
+              `[${new Date().toISOString()}] Guardrail: removendo p_id_banco_esquema=${requestedSchemaId} por falta de evidencia no contexto (nem por id, nem por nome de schema).`
+            );
+            const { p_id_banco_esquema: _ignoredSchemaId, ...restInput } = toolInput;
+            toolInput = restInput;
+          }
+
+          // Short-circuit if we already have metadata cached for these params: avoid re-calling the API repeatedly.
+          try {
+            const idBancoExterno = Number(toolInput.p_id_banco_externo);
+            const idBancoEsquema = Number(toolInput.p_id_banco_esquema);
+            const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
+            const cachedUri = metadataUriByEndpoint.get(metadataKey);
+            if (cachedUri) {
+              const metadataText = await fs.promises.readFile(cachedUri.fsPath, 'utf8').catch(() => undefined);
+              const schemas = metadataText ? listMetadataSchemas(metadataText) : [];
+              const schemaSummary = schemas.length > 0 ? schemas.map((s) => `- ${s}`).join('\n') : '(nenhum schema detectado)';
+              const msg =
+                `Metadados ja carregados em: ${cachedUri.fsPath}\n\n` +
+                `Resumo (nivel 1 - schemas):\n${schemaSummary}\n\n` +
+                'Proximo passo obrigatorio (nivel 2): chame aria_obter_tabelas_metadados para o schema escolhido.\n' +
+                'Depois (nivel 3): chame aria_obter_colunas_metadados para cada tabela selecionada.\n' +
+                'Nao escreva SQL antes de concluir os niveis 2 e 3.';
+
+              toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, [
+                new vscode.LanguageModelTextPart(msg)
+              ]));
+
+              metadataCalledInRequest = true;
+              metadataSchemasListedInRequest = true;
+              response.reference(cachedUri);
+              output.appendLine(`[${new Date().toISOString()}] Guardrail: usando metadados em cache para ${metadataKey}, evitando nova chamada.`);
+              continue;
+            }
+          } catch (e) {
+            // se falhar no shortcut, segue para invocar a tool normalmente
+          }
+        }
+
+        output.appendLine(`[${new Date().toISOString()}] Tool: ${toolCall.name} input: ${summarizeForLog(toolInput)}`);
         try {
           const result = await vscode.lm.invokeTool(
             toolCall.name,
-            { input: toolCall.input as object, toolInvocationToken: request.toolInvocationToken },
+            { input: toolInput as object, toolInvocationToken: request.toolInvocationToken },
             token
           );
           toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, result.content));
           // Se metadados foram obtidos, adiciona referencia ao arquivo no chat
           if (toolCall.name === 'aria_obter_metadados') {
             metadataCalledInRequest = true;
-            const idBancoExterno = Number((toolCall.input as Record<string, unknown>).p_id_banco_externo);
-            const idBancoEsquema = Number((toolCall.input as Record<string, unknown>).p_id_banco_esquema);
+            metadataSchemasListedInRequest = true;
+            const idBancoExterno = Number((toolInput as Record<string, unknown>).p_id_banco_externo);
+            const idBancoEsquema = Number((toolInput as Record<string, unknown>).p_id_banco_esquema);
             const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
             const uri = metadataUriByEndpoint.get(metadataKey);
             if (uri) { response.reference(uri); }
+          } else if (toolCall.name === 'aria_obter_esquemas_metadados') {
+            metadataSchemasListedInRequest = true;
+          } else if (toolCall.name === 'aria_obter_tabelas_metadados') {
+            metadataTablesListedInRequest = true;
+          } else if (toolCall.name === 'aria_obter_colunas_metadados') {
+            metadataColumnsListedInRequest = true;
+            const schema = toStringSafe((toolInput as Record<string, unknown>).schema).trim().toUpperCase();
+            const tabela = toStringSafe((toolInput as Record<string, unknown>).tabela).trim().toUpperCase();
+            const tableName = tableRefNameOnly(tabela);
+            if (tabela) {
+              columnMetadataRequestedTables.add(tabela);
+            }
+            if (tableName) {
+              columnMetadataRequestedTables.add(tableName);
+            }
+            if (schema && tableName) {
+              columnMetadataRequestedTables.add(`${schema}.${tableName}`);
+            }
           }
         } catch (err) {
           toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, [
@@ -2181,6 +2772,14 @@ export function activate(context: vscode.ExtensionContext): void {
       if (isEndpointMutationIntent && !metadataCalledInRequest) {
         messages.push(vscode.LanguageModelChatMessage.User(
           'Ainda falta chamada obrigatoria: aria_obter_metadados. Execute-a antes de concluir qualquer proposta.'
+        ));
+      } else if (
+        isEndpointMutationIntent &&
+        metadataCalledInRequest &&
+        (!metadataTablesListedInRequest || !metadataColumnsListedInRequest)
+      ) {
+        messages.push(vscode.LanguageModelChatMessage.User(
+          'Ainda falta concluir o pipeline de metadados: execute aria_obter_tabelas_metadados e aria_obter_colunas_metadados antes da proposta final.'
         ));
       }
     }
@@ -2673,6 +3272,171 @@ function countMetadataTablesBySchema(full: string): Record<string, number> {
   }
 
   return counts;
+}
+
+function parseMetadataMarkdown(markdown: string, filePath?: string, key?: string): ParsedMetadataCatalog {
+  const schemaMap = new Map<string, ParsedMetadataSchema>();
+  const lines = markdown.split(/\r?\n/);
+  let currentSchemaName = '';
+  let currentTable: ParsedMetadataTable | undefined;
+
+  const getOrCreateSchema = (schemaName: string): ParsedMetadataSchema => {
+    const normalized = schemaName.trim().toUpperCase();
+    const existing = schemaMap.get(normalized);
+    if (existing) {
+      return existing;
+    }
+
+    const created: ParsedMetadataSchema = { name: normalized, tables: [] };
+    schemaMap.set(normalized, created);
+    return created;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+
+    if (line.startsWith('# ') && !line.startsWith('## ')) {
+      const schemaName = line.slice(2).trim().split(/\s+/)[0];
+      if (schemaName) {
+        currentSchemaName = schemaName.toUpperCase();
+        getOrCreateSchema(currentSchemaName);
+        currentTable = undefined;
+      }
+      continue;
+    }
+
+    if (line.startsWith('## ')) {
+      const rest = line.slice(3).trim();
+      if (!rest) {
+        continue;
+      }
+
+      const parts = rest.split(/\s+/);
+      const tableToken = toStringSafe(parts.shift()).trim().toUpperCase();
+      const comment = parts.join(' ').trim();
+      if (!tableToken) {
+        continue;
+      }
+
+      const schemaName = tableToken.includes('.')
+        ? tableToken.split('.')[0].toUpperCase()
+        : currentSchemaName;
+      const tableName = tableToken.includes('.')
+        ? tableToken.split('.').slice(1).join('.')
+        : tableToken;
+      const fullName = tableToken.includes('.')
+        ? tableToken
+        : (schemaName ? `${schemaName}.${tableName}` : tableName);
+
+      const schemaNode = getOrCreateSchema(schemaName || currentSchemaName || '');
+      currentTable = {
+        schema: schemaNode.name,
+        name: tableName,
+        fullName,
+        comment: comment || undefined,
+        columns: [],
+        foreignKeys: []
+      };
+      schemaNode.tables.push(currentTable);
+      continue;
+    }
+
+    if (line.startsWith('- ') && currentTable) {
+      const entry = line.slice(2).trim();
+      if (!entry) {
+        continue;
+      }
+
+      const fkMatch = entry.match(/^FK:\s*(\S+)\s*->\s*([^.\s]+)\.([^\s(]+)\(([^\s)]+)\)\s*(.*)$/i);
+      if (fkMatch) {
+        currentTable.foreignKeys.push({
+          column: fkMatch[1].trim().toUpperCase(),
+          targetSchema: fkMatch[2].trim().toUpperCase(),
+          targetTable: fkMatch[3].trim().toUpperCase(),
+          targetColumn: fkMatch[4].trim().toUpperCase(),
+          raw: line.trim()
+        });
+        continue;
+      }
+
+      const columnMatch = entry.match(/^(\S+)\s+(\S+)(?:\s+(.*))?$/);
+      if (!columnMatch) {
+        continue;
+      }
+
+      currentTable.columns.push({
+        name: columnMatch[1].trim().toUpperCase(),
+        type: columnMatch[2].trim(),
+        comment: columnMatch[3]?.trim() || undefined,
+        raw: line.trim()
+      });
+    }
+  }
+
+  return {
+    key: key ?? filePath ?? '',
+    filePath,
+    markdown,
+    schemas: Array.from(schemaMap.values())
+  };
+}
+
+function buildProjectSchemaLockSummary(projects: AriaProject[], prompt: string): string {
+  if (!Array.isArray(projects) || projects.length === 0) {
+    return '';
+  }
+
+  const normalizedPrompt = toStringSafe(prompt).toUpperCase();
+  const promptTokens = new Set(extractKeywordTokens(prompt));
+
+  const scoredProjects = projects
+    .map((project) => {
+      const projectName = toStringSafe(project.NO_PROJETO).trim().toUpperCase();
+      const projectPath = toStringSafe(project.TX_PATH).trim().toUpperCase();
+      const nameTokens = extractKeywordTokens(project.NO_PROJETO);
+      const tokenHits = nameTokens.filter((token) => promptTokens.has(token)).length;
+
+      let score = 0;
+      if (projectName && normalizedPrompt.includes(projectName)) {
+        score += 100;
+      }
+      if (projectPath && normalizedPrompt.includes(projectPath)) {
+        score += 80;
+      }
+      score += tokenHits * 10;
+
+      return { project, score };
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return toStringSafe(a.project.NO_PROJETO).localeCompare(toStringSafe(b.project.NO_PROJETO));
+    });
+
+  const selected = scoredProjects[0];
+  if (!selected || selected.score <= 0) {
+    return '';
+  }
+
+  const schemaSet = new Set<string>();
+  for (const endpoint of selected.project.REST_CUSTOM ?? []) {
+    const schema = toStringSafe(endpoint.NO_ESQUEMA ?? endpoint.no_esquema ?? endpoint.CO_ESQUEMA ?? endpoint.co_esquema).trim().toUpperCase();
+    if (schema) {
+      schemaSet.add(schema);
+    }
+  }
+
+  const schemas = Array.from(schemaSet).sort((a, b) => a.localeCompare(b));
+  const projectLabel = toStringSafe(selected.project.NO_PROJETO).trim() || '(sem nome)';
+  const projectPath = toStringSafe(selected.project.TX_PATH).trim();
+  const projectRef = projectPath ? `${projectLabel} [${projectPath}]` : projectLabel;
+
+  if (schemas.length === 0) {
+    return `SCHEMA LOCK: projeto ${projectRef} nao teve schema identificado no contexto. Nao misture schemas e pergunte se precisar decidir entre tabelas de schemas diferentes.`;
+  }
+
+  return `SCHEMA LOCK: projeto ${projectRef} -> schemas permitidos neste pedido: ${schemas.join(', ')}. Use somente tabelas desses schemas. Se uma tabela candidata estiver em outro schema, descarte-a.`;
 }
 
 function extractTableColumns(full: string, tableKey: string): string | undefined {

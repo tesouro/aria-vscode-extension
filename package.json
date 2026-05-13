@@ -257,7 +257,7 @@
       {
         "name": "aria_obter_metadados",
         "displayName": "ARIA: Obter Metadados do Banco",
-        "modelDescription": "Retorna o catálogo de tabelas e colunas do banco de dados (de /obtem-metadados), salva em arquivo e referencia no chat. Use para descobrir tabelas e colunas reais antes de escrever SQL. NUNCA invente tabelas ou colunas — use sempre os metadados reais.",
+        "modelDescription": "Carrega e processa internamente o catálogo de metadados do banco (de /obtem-metadados), salva em arquivo e referencia no chat. Esta ferramenta retorna apenas o nível 1 (schemas). Depois, obrigatoriamente, use aria_obter_tabelas_metadados e aria_obter_colunas_metadados para os níveis 2 e 3 antes de escrever SQL.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -282,6 +282,75 @@
             }
           },
           "required": ["p_id_banco_externo"]
+        }
+      },
+      {
+        "name": "aria_obter_esquemas_metadados",
+        "displayName": "ARIA: Listar Schemas do Catálogo",
+        "modelDescription": "Retorna apenas a lista de schemas detectados no catálogo de metadados já carregado em memória para um banco/esquema. Use para escolher o schema correto antes de listar tabelas.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "p_id_banco_externo": {
+              "type": "number",
+              "description": "ID do banco externo (ID_BANCO_EXTERNO)."
+            },
+            "p_id_banco_esquema": {
+              "type": "number",
+              "description": "Opcional. ID do esquema do banco (ID_BANCO_ESQUEMA)."
+            }
+          },
+          "required": ["p_id_banco_externo"]
+        }
+      },
+      {
+        "name": "aria_obter_tabelas_metadados",
+        "displayName": "ARIA: Listar Tabelas de um Schema",
+        "modelDescription": "Retorna apenas as tabelas do schema escolhido, usando o catálogo de metadados em memória. Use depois de escolher o schema e antes de solicitar colunas.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "p_id_banco_externo": {
+              "type": "number",
+              "description": "ID do banco externo (ID_BANCO_EXTERNO)."
+            },
+            "p_id_banco_esquema": {
+              "type": "number",
+              "description": "Opcional. ID do esquema do banco (ID_BANCO_ESQUEMA)."
+            },
+            "schema": {
+              "type": "string",
+              "description": "Nome do schema para filtrar tabelas (ex: COSIS_MICRO)."
+            }
+          },
+          "required": ["p_id_banco_externo"]
+        }
+      },
+      {
+        "name": "aria_obter_colunas_metadados",
+        "displayName": "ARIA: Listar Colunas e FKs da Tabela",
+        "modelDescription": "Retorna apenas colunas e FKs da tabela selecionada, usando o catálogo de metadados em memória. Use esta saída para montar SQL sem inventar coluna, tabela ou join.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "p_id_banco_externo": {
+              "type": "number",
+              "description": "ID do banco externo (ID_BANCO_EXTERNO)."
+            },
+            "p_id_banco_esquema": {
+              "type": "number",
+              "description": "Opcional. ID do esquema do banco (ID_BANCO_ESQUEMA)."
+            },
+            "schema": {
+              "type": "string",
+              "description": "Opcional. Nome do schema da tabela (ex: COSIS_MICRO)."
+            },
+            "tabela": {
+              "type": "string",
+              "description": "Nome da tabela (com ou sem schema), ex: MICROSERVICOS ou COSIS_MICRO.MICROSERVICO."
+            }
+          },
+          "required": ["p_id_banco_externo", "tabela"]
         }
       },
       {
