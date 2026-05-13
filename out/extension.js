@@ -1842,8 +1842,36 @@ function activate(context) {
                 await client.saveDataset(payload);
                 dataset = await client.getProjectEndpointTree();
                 tree.refresh();
+                const importedEndpointSummaries = [];
+                for (const project of payload.registros ?? []) {
+                    const projectId = toNumber(project.ID_PROJETO);
+                    const projectName = toStringSafe(project.NO_PROJETO) || '(sem nome)';
+                    for (const endpointRaw of project.REST_CUSTOM ?? []) {
+                        const endpoint = endpointRaw;
+                        const endpointId = toNumber(endpoint.ID_REST_CUSTOM);
+                        const action = endpointId > 0 ? 'editado' : 'criado';
+                        const endpointName = toStringSafe(endpoint.NO_REST_CUSTOM) || '(sem nome)';
+                        const endpointPath = toStringSafe(endpoint.TX_PATH) || '(sem path)';
+                        const methodName = toStringSafe(endpoint.NO_METODO) || `ID ${toNumber(endpoint.ID_METODO)}`;
+                        importedEndpointSummaries.push(`${action}: projeto ${projectId} ${projectName} | endpoint ${endpointName} ` +
+                            `(ID_REST_CUSTOM=${endpointId}, TX_PATH=${endpointPath}, ID_METODO=${toNumber(endpoint.ID_METODO)} ${methodName}, ` +
+                            `ID_BANCO_EXTERNO=${toNumber(endpoint.ID_BANCO_EXTERNO)}, ID_BANCO_ESQUEMA=${toNumber(endpoint.ID_BANCO_ESQUEMA)}, ` +
+                            `ID_TIPO_CODIGO=${toNumber(endpoint.ID_TIPO_CODIGO)})`);
+                    }
+                }
+                const successLines = ['JSON importado com sucesso.'];
+                if (importedEndpointSummaries.length > 0) {
+                    successLines.push(...importedEndpointSummaries.slice(0, 5).map((line) => `- ${line}`));
+                    if (importedEndpointSummaries.length > 5) {
+                        successLines.push(`- ... e mais ${importedEndpointSummaries.length - 5} endpoint(s).`);
+                    }
+                }
+                else {
+                    successLines.push('- Nenhum endpoint encontrado no payload importado.');
+                }
+                successLines.push('Arvore de projetos atualizada.');
                 return new vscode.LanguageModelToolResult([
-                    new vscode.LanguageModelTextPart('JSON importado com sucesso. Arvore de projetos atualizada.')
+                    new vscode.LanguageModelTextPart(successLines.join('\n'))
                 ]);
             }
             catch (error) {
@@ -2507,7 +2535,7 @@ function buildEndpointFromExampleStructure(project, overrides, lovs, options) {
         CO_BANCO_EXTERNO: bankDefaults.CO_BANCO_EXTERNO,
         ID_BANCO_ESQUEMA: bankDefaults.ID_BANCO_ESQUEMA,
         NO_ESQUEMA: bankDefaults.NO_ESQUEMA,
-        SN_MODO_COMPATIBILIDADE: 'S',
+        SN_MODO_COMPATIBILIDADE: 'N',
         SN_CACHE: 'N',
         SN_PUBLICADO: 'S',
         SN_INCLUI_COUNT: 'N',
