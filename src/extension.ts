@@ -846,8 +846,9 @@ function isEndpointProposalCompleteForConfirmation(text: string): boolean {
   const hasSchema = /(esquema|id_banco_esquema|schema)/.test(normalized);
   const hasDescription = /(ds_rest_custom_curta|descricao curta|tx_comentarios|comentarios)/.test(normalized);
   const hasConfirmationAsk = /(confirma|confirmacao|deseja prosseguir|posso prosseguir|pode criar|pode prosseguir)/.test(normalized);
+  const hasSql = /\bselect\b[\s\S]+\bfrom\b/.test(normalized);
 
-  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk;
+  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk && hasSql;
 }
 
 function extractToolResultText(content: readonly unknown[]): string {
@@ -2158,6 +2159,14 @@ export function activate(context: vscode.ExtensionContext): void {
                 ep.VARIABLE = normalizedVars;
               }
             }
+
+            // Remove trailing semicolons from TX_CODIGO only for pure SQL (not PL/SQL or Python)
+            for (const endpointRaw of project.REST_CUSTOM ?? []) {
+              const ep = endpointRaw as Record<string, unknown>;
+              if (isSqlEndpointCodeType(ep) && typeof ep.TX_CODIGO === 'string' && ep.TX_CODIGO.trim()) {
+                ep.TX_CODIGO = ep.TX_CODIGO.trimEnd().replace(/;+$/, '');
+              }
+            }
           }
 
           const metadataMissing: string[] = [];
@@ -2604,6 +2613,7 @@ export function activate(context: vscode.ExtensionContext): void {
       '- NUNCA use SELECT * ou SELECT tabela.*. Sempre liste colunas com alias camelCase.',
       '- NUNCA deixe coluna sem alias no SELECT.',
       '- NUNCA use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de resposta JSON (ex: origem, nomeProjeto).',
+      '- NUNCA termine SQL puro com ponto e virgula (;). O banco executa internamente; ; causa erro de syntax. (PL/SQL e Python podem usar ; normalmente.)',
       '- NUNCA emita mensagem intermediaria entre chamadas de tools e a proposta final ao usuario.',
       '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
       '- NUNCA chame aria_importar_json sem confirmacao explicita do usuario.',
@@ -2846,9 +2856,10 @@ export function activate(context: vscode.ExtensionContext): void {
               );
 
               messages.push(vscode.LanguageModelChatMessage.User(
-                'Nao responda apenas com SQL. Reescreva com proposta COMPLETA do endpoint para confirmacao do usuario: ' +
+                'Proposta incompleta para confirmacao do usuario. Reescreva incluindo TODOS os itens: ' +
                 'Nome do Endpoint, Caminho (TX_PATH), Metodo HTTP, Tipo de Codigo/Linguagem, Banco Externo, Esquema, ' +
-                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, SQL final e pergunta unica de confirmacao.'
+                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, SQL completo (SELECT ... FROM ...) e pergunta unica de confirmacao. ' +
+                'O SQL nao deve terminar com ponto e virgula (;).'
               ));
               continue;
             }
