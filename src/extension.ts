@@ -861,6 +861,43 @@ function extractSqlCandidateFromText(text: string): string | undefined {
   return tail.slice(0, endIndex).trim() || undefined;
 }
 
+function hasEndpointCodeCandidate(text: string): boolean {
+  const source = toStringSafe(text);
+  if (!source.trim()) {
+    return false;
+  }
+
+  const fencedBlocks = source.match(/```([\s\S]*?)```/g) ?? [];
+  for (const block of fencedBlocks) {
+    const body = block.replace(/^```[a-zA-Z0-9_-]*\s*/i, '').replace(/```$/i, '').trim();
+    if (!body) {
+      continue;
+    }
+
+    if (/^\s*(sql|plsql|python)\b/i.test(block)) {
+      return true;
+    }
+
+    if (/(?:\bselect\b[\s\S]*\bfrom\b|\bbegin\b[\s\S]*\bend;?|\bdef\s+[A-Za-z_][\w]*\s*\(|\bimport\s+[A-Za-z_][\w.]*|\breturn\b|\bjson_object\b|\bapex_json\b|\bcursor\b|\bfor\b[\s\S]*\bloop\b)/i.test(body)) {
+      return true;
+    }
+  }
+
+  if (/\bselect\b[\s\S]*\bfrom\b/i.test(source)) {
+    return true;
+  }
+
+  if (/\bbegin\b[\s\S]*\bend;?/i.test(source)) {
+    return true;
+  }
+
+  if (/\bdef\s+[A-Za-z_][\w]*\s*\(|\bimport\s+[A-Za-z_][\w.]*|\breturn\b/i.test(source)) {
+    return true;
+  }
+
+  return false;
+}
+
 function hasQuotedIdentifiersOutsideAliases(sql: string): boolean {
   const source = toStringSafe(sql);
   if (!source.trim()) {
@@ -1027,7 +1064,7 @@ function isAffirmativeConfirmationPrompt(prompt: string): boolean {
     return false;
   }
 
-  return /^(sim|s|ok|pode|pode sim|confirmo|confirmado|prosseguir|continue|segue|yes)\b/.test(normalized);
+  return /^(sim|s|ok|pode|pode sim|confirmo|confirmado|prosseguir|continue|segue|yes|isso|isso mesmo|e isso|e isso mesmo|certo|correto|exato|exatamente|concordo|pode ser|pode fazer|faz|manda|beleza|perfeito|bora|vai|pode criar|pode salvar|pode importar|manda ver|vai la|ta bom|ta certo|ta otimo)\b/.test(normalized);
 }
 
 function isEndpointProposalCompleteForConfirmation(text: string): boolean {
@@ -1048,9 +1085,9 @@ function isEndpointProposalCompleteForConfirmation(text: string): boolean {
   const hasSchema = /(esquema|id_banco_esquema|schema)/.test(normalized);
   const hasDescription = /(ds_rest_custom_curta|descricao curta|tx_comentarios|comentarios)/.test(normalized);
   const hasConfirmationAsk = /(confirma|confirmacao|deseja prosseguir|posso prosseguir|pode criar|pode prosseguir)/.test(normalized);
-  const hasSql = /\bselect\b[\s\S]+\bfrom\b/.test(normalized);
+  const hasCode = hasEndpointCodeCandidate(text);
 
-  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk && hasSql;
+  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk && hasCode;
 }
 
 function looksLikeEndpointProposalWithoutSql(text: string): boolean {
@@ -1077,6 +1114,111 @@ function looksLikeEndpointProposalWithoutSql(text: string): boolean {
   return proposalSignals.some((pattern) => pattern.test(normalized)) && !/\bselect\b[\s\S]*\bfrom\b/i.test(normalized);
 }
 
+function hasEndpointProposalContext(text: string): boolean {
+  const normalized = toStringSafe(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (!normalized.trim()) {
+    return false;
+  }
+
+  const hasSql = /\bselect\b[\s\S]*\bfrom\b/.test(normalized);
+  if (!hasSql) {
+    return false;
+  }
+
+  const hasProposalFields = /\b(no_rest_custom|tx_path|id_metodo|id_tipo_codigo|id_banco_externo|id_banco_esquema|ds_rest_custom_curta|tx_comentarios|nome do endpoint|caminho|metodo|tipo de codigo|banco externo|esquema)\b/.test(normalized);
+  const hasConfirmationAsk = /\b(confirma|confirmacao|deseja prosseguir|posso prosseguir|pode criar|pode prosseguir|devo criar|quer que eu crie)\b/.test(normalized);
+
+  return hasProposalFields || hasConfirmationAsk;
+}
+
+function normalizeEndpointPayloadForComparison(endpoint: Record<string, unknown>): Record<string, unknown> {
+  const ignoredKeys = new Set([
+    'PROJETO',
+    'REST_CUSTOM',
+    'REST_CUSTOM_JSON_SCHEMA',
+    'REST_CUSTOM_PERFIL',
+    'REST_CUSTOM_RESPONSE',
+    'REST_CUSTOM_IP',
+    'REST_CUSTOM_TIPO_OTP',
+    'REST_CUSTOM_ATRIBUTO_LOG'
+  ]);
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(endpoint)) {
+    if (ignoredKeys.has(key)) {
+      continue;
+    }
+
+    if (key === 'VARIABLE' && Array.isArray(value)) {
+      normalized[key] = value.map((item) => {
+        const record = asRecord(item) ?? {};
+        const { REST_CUSTOM_JSON_SCHEMA: _ignoredSchema, ...rest } = record;
+        return rest;
+      });
+      continue;
+    }
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      normalized[key] = normalizeEndpointPayloadForComparison(asRecord(value) ?? {});
+      continue;
+    }
+
+    normalized[key] = value;
+  }
+
+  return normalized;
+}
+
+function endpointPayloadSignature(endpoint: Record<string, unknown>): string {
+  return JSON.stringify(normalizeEndpointPayloadForComparison(endpoint));
+}
+
+function extractSingleEditedEndpointFromEnvelope(
+  envelope: Record<string, unknown>,
+  existingEndpoints: AriaEndpoint[]
+): Record<string, unknown> | undefined {
+  const nestedEndpoints = asArray(envelope.REST_CUSTOM)
+    ?.map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item)) ?? [];
+
+  if (nestedEndpoints.length === 0) {
+    return undefined;
+  }
+
+  if (nestedEndpoints.length === 1) {
+    return nestedEndpoints[0];
+  }
+
+  const existingById = new Map<number, Record<string, unknown>>();
+  for (const endpoint of existingEndpoints) {
+    existingById.set(toNumber(endpoint.ID_REST_CUSTOM), endpoint as Record<string, unknown>);
+  }
+
+  const changedEndpoints = nestedEndpoints.filter((candidate) => {
+    const candidateId = toNumber(candidate.ID_REST_CUSTOM);
+    if (candidateId <= 0) {
+      return true;
+    }
+
+    const existing = existingById.get(candidateId);
+    if (!existing) {
+      return true;
+    }
+
+    return endpointPayloadSignature(candidate) !== endpointPayloadSignature(existing);
+  });
+
+  if (changedEndpoints.length === 1) {
+    return changedEndpoints[0];
+  }
+
+  return undefined;
+}
+
 function isEndpointProposalReadyForImport(text: string): boolean {
   if (!isEndpointProposalCompleteForConfirmation(text)) {
     return false;
@@ -1084,7 +1226,7 @@ function isEndpointProposalReadyForImport(text: string): boolean {
 
   const sql = extractSqlCandidateFromText(text);
   if (!sql) {
-    return false;
+    return hasEndpointCodeCandidate(text);
   }
 
   if (hasSelectStar(sql)) {
@@ -2106,15 +2248,28 @@ export function activate(context: vscode.ExtensionContext): void {
         const idProjeto = Number(options.input.id_projeto);
         try {
           const ds = await client.getDatasetByProjectId(idProjeto);
+          // Strip TX_CODIGO e VARIABLE para reduzir o tamanho da resposta.
+          // O importar_json faz merge automatico dos endpoints, entao o modelo
+          // nao precisa (nem deve) enviar os endpoints existentes.
           const stripped = ds.registros.map((proj) => ({
             ...proj,
             REST_CUSTOM: proj.REST_CUSTOM.map((ep) => {
-              const { REST_CUSTOM_JSON_SCHEMA: _ignored, ...rest } = ep as Record<string, unknown>;
+              const {
+                REST_CUSTOM_JSON_SCHEMA: _schema,
+                TX_CODIGO: _codigo,
+                VARIABLE: _vars,
+                ...rest
+              } = ep as Record<string, unknown>;
               return rest;
             })
           }));
           return new vscode.LanguageModelToolResult([
-            new vscode.LanguageModelTextPart(JSON.stringify(stripped, null, 2))
+            new vscode.LanguageModelTextPart(
+              JSON.stringify(stripped, null, 2) +
+              '\n\n// NOTA: TX_CODIGO e VARIABLE omitidos para economizar contexto.' +
+              '\n// O importar_json preserva endpoints existentes automaticamente.' +
+              '\n// Envie apenas o(s) endpoint(s) novo(s)/modificado(s) em REST_CUSTOM.'
+            )
           ]);
         } catch (error) {
           return new vscode.LanguageModelToolResult([
@@ -2197,14 +2352,19 @@ export function activate(context: vscode.ExtensionContext): void {
             ? schemas.map((schema) => `- ${schema}`).join('\n')
             : '(nenhum schema detectado)';
 
+          const allTables = extractMetadataTableNames(metadata);
+          const tableList = allTables.length > 0
+            ? allTables.sort().join('\n')
+            : '(nenhuma tabela detectada)';
+
           return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(
               `Metadados salvos em: ${filePath}\n\n` +
-              'Resumo (nivel 1 - schemas):\n' +
+              'Schemas disponiveis:\n' +
               `${schemaSummary}\n\n` +
-              'Proximo passo obrigatorio (nivel 2): chame aria_obter_tabelas_metadados para o schema escolhido.\n' +
-              'Depois (nivel 3): chame aria_obter_colunas_metadados para cada tabela selecionada.\n' +
-              'Nao escreva SQL antes de concluir os niveis 2 e 3.'
+              'Tabelas disponiveis (SCHEMA.TABELA):\n' +
+              `${tableList}\n\n` +
+              'Proximo passo obrigatorio: chame aria_obter_colunas_metadados para a(s) tabela(s) do assunto antes de escrever qualquer codigo.'
             )
           ]);
         } catch (error) {
@@ -2384,9 +2544,9 @@ export function activate(context: vscode.ExtensionContext): void {
             const incomingProject = asRecord(rawProject) ?? {};
             const projectId = toNumber(incomingProject.ID_PROJETO);
             if (!(projectId > 0)) {
-              return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart('Importacao bloqueada: cada projeto em registros deve informar ID_PROJETO valido.')
-              ]);
+              // Ignora objetos sem ID_PROJETO (pode ser endpoint enviado diretamente no lugar do projeto).
+              output.appendLine(`[${new Date().toISOString()}] aria_importar_json: ignorando objeto sem ID_PROJETO valido`);
+              continue;
             }
 
             let fullProject = projectCache.get(projectId);
@@ -2413,15 +2573,41 @@ export function activate(context: vscode.ExtensionContext): void {
               return rest;
             }) as unknown as AriaEndpoint[];
 
+            // Merge: preserva endpoints existentes; adiciona novos (ID_REST_CUSTOM=0)
+            // ou substitui existentes (ID_REST_CUSTOM>0 com mesmo ID).
+            const existingEps: AriaEndpoint[] = [...(fullProject.REST_CUSTOM ?? [])];
+            for (const incomingEp of normalizedEndpoints) {
+              const incomingId = toNumber((incomingEp as Record<string, unknown>).ID_REST_CUSTOM);
+              if (incomingId > 0) {
+                const idx = existingEps.findIndex((ep) => toNumber(ep.ID_REST_CUSTOM) === incomingId);
+                if (idx >= 0) {
+                  existingEps[idx] = incomingEp as AriaEndpoint;
+                } else {
+                  existingEps.push(incomingEp as AriaEndpoint);
+                }
+              } else {
+                existingEps.push(incomingEp as AriaEndpoint);
+              }
+            }
+
             const mergedProject = {
               ...(fullProject as Record<string, unknown>),
               ...incomingProject,
               ID_PROJETO: projectId,
               TX_PATH: toStringSafe(incomingProject.TX_PATH ?? fullProject.TX_PATH),
-              REST_CUSTOM: normalizedEndpoints
+              REST_CUSTOM: existingEps
             } as AriaProject;
 
             enrichedProjects.push(mergedProject);
+          }
+
+          if (enrichedProjects.length === 0) {
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Importacao bloqueada: nenhum objeto em registros possui ID_PROJETO valido. ' +
+                'Envie { "registros": [<projeto_completo_obtido_de_aria_obter_json_projeto>] } com ID_PROJETO preenchido.'
+              )
+            ]);
           }
 
           const payload: AriaDataset = {
@@ -2578,6 +2764,9 @@ export function activate(context: vscode.ExtensionContext): void {
             `[${new Date().toISOString()}] aria_importar_json: ${payloadStr.length} bytes, ` +
             `projetos=${payload.registros.length} (payload enriquecido com campos completos do projeto)`
           );
+          output.appendLine('--- JSON gerado ---');
+          output.appendLine(payloadStr);
+          output.appendLine('--- fim do JSON ---');
           await client.saveDataset(payload);
           dataset = await client.getProjectEndpointTree();
           tree.refresh();
@@ -2620,6 +2809,294 @@ export function activate(context: vscode.ExtensionContext): void {
         } catch (error) {
           return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(`Erro ao importar JSON: ${toErrorMessage(error)}`)
+          ]);
+        }
+      }
+    }),
+
+    // Tool: importar endpoint individual (backend busca projeto, faz merge, salva)
+    vscode.lm.registerTool<{ id_projeto: number; endpoint: unknown }>('aria_importar_json_endpoint', {
+      async invoke(options, _token) {
+        if (!client) { return notConnectedResult(); }
+        try {
+          const rawInput = options.input as Record<string, unknown>;
+          output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: rawInput keys = ${Object.keys(rawInput).join(', ')}`);
+
+          const idProjeto = Number(rawInput.id_projeto);
+          if (!(idProjeto > 0)) {
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: id_projeto invalido: ${rawInput.id_projeto}`);
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart('Parametro invalido: id_projeto deve ser um numero maior que zero.')
+            ]);
+          }
+
+          // Extrai o endpoint do input, lidando com varias estruturas que o modelo pode enviar:
+          // 1) { id_projeto, endpoint: { NO_REST_CUSTOM, ... } }  — formato esperado
+          // 2) { id_projeto, endpoint: { REST_CUSTOM: [{ NO_REST_CUSTOM, ... }] } } — modelo envelopou em REST_CUSTOM
+          // 3) { id_projeto, NO_REST_CUSTOM, ... } — modelo colocou campos no nivel raiz
+          let resolvedEndpoint: Record<string, unknown> | undefined;
+
+          const endpointField = rawInput.endpoint;
+          if (endpointField && typeof endpointField === 'object' && !Array.isArray(endpointField)) {
+            const epRecord = endpointField as Record<string, unknown>;
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(epRecord).join(', ')}`);
+
+            // Caso 2: o modelo enviou { REST_CUSTOM: [...] } como endpoint
+            const restCustomArray = asArray(epRecord.REST_CUSTOM);
+            if (restCustomArray && restCustomArray.length > 0 && !epRecord.NO_REST_CUSTOM && !epRecord.TX_PATH) {
+              const firstEp = asRecord(restCustomArray[0]);
+              if (firstEp) {
+                output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: extraindo primeiro item de REST_CUSTOM[] como endpoint`);
+                resolvedEndpoint = firstEp;
+              }
+            } else {
+              // Caso 1: formato esperado
+              resolvedEndpoint = epRecord;
+            }
+          } else if (!endpointField && rawInput.NO_REST_CUSTOM) {
+            // Caso 3: campos no nivel raiz
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: usando campos do nivel raiz como endpoint`);
+            const { id_projeto: _id, ...rest } = rawInput;
+            resolvedEndpoint = rest;
+          }
+
+          if (!resolvedEndpoint) {
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - nao conseguiu resolver endpoint do input`);
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: input completo = ${JSON.stringify(rawInput).slice(0, 2000)}`);
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Parametro invalido: endpoint nao encontrado no input. ' +
+                'Envie { id_projeto: <id>, endpoint: { NO_REST_CUSTOM: "...", TX_PATH: "...", TX_CODIGO: "...", ... } }.'
+              )
+            ]);
+          }
+
+          // Busca o projeto completo do servidor
+          const fullDataset = await client.getDatasetByProjectId(idProjeto);
+          const fullProject = fullDataset.registros.find((item) => item.ID_PROJETO === idProjeto);
+          if (!fullProject) {
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(`Importacao bloqueada: projeto ${idProjeto} nao encontrado no gerar-json.`)
+            ]);
+          }
+
+          const fullProjectEndpoints = fullProject.REST_CUSTOM ?? [];
+
+          // Se o modelo mandou um envelope com REST_CUSTOM, tenta extrair somente o endpoint editado.
+          const envelopeRestCustom = asArray(resolvedEndpoint.REST_CUSTOM);
+          if (envelopeRestCustom && envelopeRestCustom.length > 0) {
+            const extractedEndpoint = extractSingleEditedEndpointFromEnvelope(resolvedEndpoint, fullProjectEndpoints);
+            if (extractedEndpoint) {
+              output.appendLine(
+                `[${new Date().toISOString()}] aria_importar_json_endpoint: extraindo somente o endpoint editado de envelope com REST_CUSTOM (${envelopeRestCustom.length} item(ns)).`
+              );
+              resolvedEndpoint = extractedEndpoint;
+            } else {
+              output.appendLine(
+                `[${new Date().toISOString()}] aria_importar_json_endpoint: envelope com REST_CUSTOM nao permitiu identificar um unico endpoint editado.`
+              );
+              return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(
+                  'Parametro invalido: envie somente o endpoint editado em endpoint, sem REST_CUSTOM/projeto completo. ' +
+                  'Se o payload veio de um projeto inteiro, recorte apenas um endpoint.'
+                )
+              ]);
+            }
+          }
+
+          // Remove campos de wrapper se ainda vierem junto.
+          const {
+            REST_CUSTOM: _ignoredRestCustom,
+            PROJETO: _ignoredProject,
+            REST_CUSTOM_JSON_SCHEMA: _ignoredSchema,
+            ...endpointClean
+          } = resolvedEndpoint;
+          const incomingEndpoint = endpointClean as unknown as AriaEndpoint;
+          const incomingId = toNumber((incomingEndpoint as Record<string, unknown>).ID_REST_CUSTOM);
+
+          if (!incomingEndpoint.NO_REST_CUSTOM && !incomingEndpoint.TX_PATH) {
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - endpoint sem NO_REST_CUSTOM e TX_PATH`);
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingEndpoint).join(', ')}`);
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Parametro invalido: endpoint deve conter pelo menos NO_REST_CUSTOM e TX_PATH.'
+              )
+            ]);
+          }
+
+          output.appendLine(
+            `[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint resolvido: ` +
+            `NO_REST_CUSTOM=${toStringSafe(incomingEndpoint.NO_REST_CUSTOM)}, TX_PATH=${toStringSafe(incomingEndpoint.TX_PATH)}, ` +
+            `ID_REST_CUSTOM=${toNumber(incomingEndpoint.ID_REST_CUSTOM)}`
+          );
+
+          const existingEndpointIds = new Set(
+            (fullProject.REST_CUSTOM ?? []).map((ep) => toNumber(ep.ID_REST_CUSTOM))
+          );
+
+          output.appendLine(
+            `[${new Date().toISOString()}] aria_importar_json_endpoint: projeto ${idProjeto} (${toStringSafe(fullProject.NO_PROJETO)}) ` +
+            `tem ${fullProject.REST_CUSTOM?.length ?? 0} endpoint(s) existentes: [${Array.from(existingEndpointIds).join(', ')}]`
+          );
+
+          // Merge: preserva endpoints existentes; adiciona novo (ID=0) ou substitui existente (ID>0)
+          const mergedEps: AriaEndpoint[] = [...(fullProject.REST_CUSTOM ?? [])];
+          if (incomingId > 0) {
+            const idx = mergedEps.findIndex((ep) => toNumber(ep.ID_REST_CUSTOM) === incomingId);
+            if (idx >= 0) {
+              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: substituindo endpoint existente idx=${idx} (ID=${incomingId})`);
+              mergedEps[idx] = incomingEndpoint;
+            } else {
+              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: adicionando endpoint com ID=${incomingId} (nao encontrado nos existentes)`);
+              mergedEps.push(incomingEndpoint);
+            }
+          } else {
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: adicionando endpoint novo (ID_REST_CUSTOM=0)`);
+            mergedEps.push(incomingEndpoint);
+          }
+
+          output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: total de endpoints apos merge: ${mergedEps.length}`);
+
+          const mergedProject = {
+            ...(fullProject as Record<string, unknown>),
+            ID_PROJETO: idProjeto,
+            REST_CUSTOM: mergedEps
+          } as AriaProject;
+
+          const payload: AriaDataset = {
+            registros: [mergedProject]
+          };
+
+          // Normalize VARIABLE entries
+          for (const endpointRaw of mergedProject.REST_CUSTOM ?? []) {
+            const ep = endpointRaw as Record<string, unknown>;
+            const vars = asArray(ep.VARIABLE) ?? [];
+            if (vars.length > 0) {
+              const normalizedVars: Record<string, unknown>[] = [];
+              for (let vi = 0; vi < vars.length; vi++) {
+                const rawVar = asRecord(vars[vi]) || {};
+                const noVariable = toStringSafe(rawVar.NO_VARIABLE || rawVar.TX_REGEX_QS).trim() || '';
+                const txRegex = toStringSafe(rawVar.TX_REGEX_QS).trim() || noVariable;
+                normalizedVars.push({
+                  ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
+                  NO_VARIABLE: noVariable,
+                  TX_REGEX_QS: txRegex,
+                  IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE,
+                  TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
+                });
+              }
+              ep.VARIABLE = normalizedVars;
+            }
+
+            // Remove trailing semicolons from TX_CODIGO for pure SQL
+            if (isSqlEndpointCodeType(ep) && typeof ep.TX_CODIGO === 'string' && ep.TX_CODIGO.trim()) {
+              ep.TX_CODIGO = ep.TX_CODIGO.trimEnd().replace(/;+$/, '');
+            }
+          }
+
+          // Validacoes de metadados e SELECT * (apenas para o endpoint incoming, nao os existentes)
+          const isNewEndpoint = incomingId <= 0 || !existingEndpointIds.has(incomingId);
+          const ep = incomingEndpoint as unknown as Record<string, unknown>;
+
+          if (isNewEndpoint && isSqlEndpointCodeType(ep)) {
+            const idBancoExterno = toNumber(ep.ID_BANCO_EXTERNO);
+            const idBancoEsquema = toNumber(ep.ID_BANCO_ESQUEMA);
+            const endpointName = toStringSafe(ep.NO_REST_CUSTOM) || '(sem nome)';
+            const endpointPath = toStringSafe(ep.TX_PATH) || '(sem path)';
+
+            if (!(idBancoExterno > 0)) {
+              return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Importacao bloqueada: ${endpointName} [${endpointPath}] - ID_BANCO_EXTERNO ausente.`)
+              ]);
+            }
+
+            const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
+            const metadataUri = metadataUriByEndpoint.get(metadataKey);
+            if (!metadataUri) {
+              const suggest = idBancoEsquema > 0
+                ? `aria_obter_metadados({"p_id_banco_externo": ${idBancoExterno}, "p_id_banco_esquema": ${idBancoEsquema}})`
+                : `aria_obter_metadados({"p_id_banco_externo": ${idBancoExterno}})`;
+              return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Importacao bloqueada: metadados nao carregados. Execute ${suggest} primeiro.`)
+              ]);
+            }
+
+            try {
+              const metadataText = await fs.promises.readFile(metadataUri.fsPath, 'utf8');
+              const catalogTables = new Set(extractMetadataTableNames(metadataText).map((item) => item.toUpperCase()));
+              const sqlTables = extractSqlReferencedTables(toStringSafe(ep.TX_CODIGO));
+
+              for (const sqlTable of sqlTables) {
+                const exact = catalogTables.has(sqlTable);
+                const bySuffix = !sqlTable.includes('.')
+                  ? Array.from(catalogTables).some((ct) => ct.endsWith(`.${sqlTable}`))
+                  : false;
+                if (!exact && !bySuffix) {
+                  return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(
+                      `Importacao bloqueada: SQL referencia tabela nao encontrada nos metadados: ${sqlTable}`
+                    )
+                  ]);
+                }
+              }
+            } catch (error) {
+              return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(`Importacao bloqueada: falha ao ler metadados: ${toErrorMessage(error)}`)
+              ]);
+            }
+
+            if (hasSelectStar(toStringSafe(ep.TX_CODIGO))) {
+              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: BLOQUEADO - SELECT * detectado`);
+              return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(
+                  'Importacao bloqueada: SELECT * detectado. Liste colunas explicitamente com aliases camelCase entre aspas duplas.'
+                )
+              ]);
+            }
+
+            // Verifica aliases camelCase
+            const txCodigo = toStringSafe(ep.TX_CODIGO);
+            const aliasIssues = analyzeSqlAliasIssues(txCodigo);
+            if (aliasIssues.missingAlias.length > 0 || aliasIssues.nonMnemonicAlias.length > 0) {
+              const problems: string[] = [];
+              if (aliasIssues.missingAlias.length > 0) {
+                problems.push(`Colunas sem alias: ${aliasIssues.missingAlias.join(', ')}`);
+              }
+              if (aliasIssues.nonMnemonicAlias.length > 0) {
+                problems.push(`Alias nao camelCase: ${aliasIssues.nonMnemonicAlias.join(', ')}`);
+              }
+              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: diagnostico de alias camelCase: ${problems.join('. ')}`);
+            }
+          }
+
+          const payloadStr = JSON.stringify(payload, null, 2);
+          const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
+          await fs.promises.writeFile(filePath, payloadStr, 'utf8');
+          output.appendLine(
+            `[${new Date().toISOString()}] aria_importar_json_endpoint: projeto=${idProjeto}, ` +
+            `endpoint=${toStringSafe(ep.NO_REST_CUSTOM)}, ID_REST_CUSTOM=${incomingId}, ${payloadStr.length} bytes`
+          );
+          output.appendLine('--- JSON gerado ---');
+          output.appendLine(payloadStr);
+          output.appendLine('--- fim do JSON ---');
+          await client.saveDataset(payload);
+          dataset = await client.getProjectEndpointTree();
+          tree.refresh();
+
+          const action = incomingId > 0 ? 'editado' : 'criado';
+          const endpointName = toStringSafe(ep.NO_REST_CUSTOM) || '(sem nome)';
+          const endpointPath = toStringSafe(ep.TX_PATH) || '(sem path)';
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(
+              `Endpoint ${action} com sucesso.\n` +
+              `- Projeto: ${idProjeto} (${toStringSafe(fullProject.NO_PROJETO)})\n` +
+              `- Endpoint: ${endpointName} (TX_PATH=${endpointPath}, ID_REST_CUSTOM=${incomingId})\n` +
+              'Arvore de projetos atualizada.'
+            )
+          ]);
+        } catch (error) {
+          return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(`Erro ao importar endpoint: ${toErrorMessage(error)}`)
           ]);
         }
       }
@@ -2766,153 +3243,232 @@ export function activate(context: vscode.ExtensionContext): void {
       projetosJson = `Erro ao carregar projetos: ${toErrorMessage(error)}`;
     }
 
+    // Pre-carrega LOVs: tenta identificar o projeto a partir do prompt do usuario para carregar
+    // os valores de referencia (metodos, bancos, esquemas, perfis) antes que o modelo responda.
+    let lovsJson: string | undefined;
+    let preloadedProjectId: number | undefined;
+    try {
+      const promptLower = request.prompt.toLowerCase();
+      const matchedProject = projetosRegistros.find((p) =>
+        p.NO_PROJETO && promptLower.includes(p.NO_PROJETO.toLowerCase())
+      ) ?? projetosRegistros[0];
+      if (matchedProject) {
+        preloadedProjectId = matchedProject.ID_PROJETO;
+        response.progress(`Carregando LOVs (${matchedProject.NO_PROJETO})...`);
+        const lovs = await client.getLovs(preloadedProjectId);
+        lovsJson = JSON.stringify(lovs, null, 2);
+      }
+    } catch {
+      // ignora falha no pre-carregamento de LOVs
+    }
+
+    // Pre-carrega campos obrigatorios do formulario de endpoint
+    let formItemsJson: string | undefined;
+    try {
+      response.progress('Carregando campos obrigatorios...');
+      const formItems = await client.getEndpointFormItems();
+      formItemsJson = JSON.stringify(formItems, null, 2);
+    } catch {
+      // ignora falha no pre-carregamento de campos obrigatorios
+    }
+
     const ariaTools = vscode.lm.tools.filter((t) => t.name.startsWith('aria_'));
 
     const systemPrompt = [
       'Voce e um assistente especialista na plataforma ARIA (endpoints REST sobre bancos Oracle).',
-      'O codigo da extensao NAO detecta projetos nem endpoints automaticamente.',
-      'Voce identifica projeto, banco, esquema, tabelas e colunas EXCLUSIVAMENTE pelo contexto e pelos dados retornados pelas tools.',
+      '',
+      '!! ATENCAO: TODAS AS REGRAS DESTE PROMPT SAO ABSOLUTAS E NAO NEGOCIAVEIS. !!',
       '',
       '════════════════════════════════════════',
-      '## FLUXO OBRIGATORIO — execute nesta ordem exata:',
+      '## CONTEXTO JA CARREGADO — NAO use tools para buscar esses dados',
+      '════════════════════════════════════════',
+      '',
+      '- PROJETOS E ENDPOINTS: mensagem "CONTEXTO - Projetos e endpoints disponiveis".',
+      '- LOVs (valores validos para campos ID_ e NO_): mensagem "CONTEXTO - LOVs" (se presente).',
+      '- CAMPOS OBRIGATORIOS do formulario de endpoint: mensagem "CONTEXTO - Campos obrigatorios" (se presente).',
+      '- TABELAS DISPONIVEIS: mensagem "TABELAS DISPONIVEIS NOS METADADOS" (se presente).',
+      '',
+      'NAO chame aria_obter_projetos nem aria_obter_tabelas_metadados — dados ja estao no contexto.',
+      'Se LOVs estiverem no contexto, NAO chame aria_obter_lovs.',
+      'Se campos obrigatorios estiverem no contexto, NAO chame aria_obter_itens_apex.',
+      '',
+      '════════════════════════════════════════',
+      '## FLUXO OBRIGATORIO — execute nesta ordem:',
       '════════════════════════════════════════',
       '',
       '1. IDENTIFICAR PROJETO',
-      '   - Os projetos e endpoints ja estao no contexto (de /projetos-endpoints).',
-      '   - Identifique pelo nome ou contexto. Se ambiguo, pergunte ao usuario.',
+      '   - Use a mensagem de contexto de projetos.',
+      '   - Se ambiguo, faca 1 pergunta objetiva.',
       '',
-      '2. CARREGAR LOVs: aria_obter_lovs(id_projeto)',
-      '   - Fornece valores validos para ID_METODO, ID_TIPO_CODIGO, ID_TIPO_HEADER, ID_BANCO_EXTERNO (e seus esquemas), perfis, OTPs etc.',
-      '   - Use-as para preencher todos os campos ID_ e NO_ do endpoint.',
+      '2. IDENTIFICAR BANCO EXTERNO',
+      '   - ID_BANCO_EXTERNO: deduzido das LOVs (lista BANCO_EXTERNO) e dos endpoints existentes no contexto de projetos.',
+      '   - Se outro endpoint do mesmo projeto ja usa um banco, use o mesmo ID_BANCO_EXTERNO.',
+      '   - Se ainda incerto, faca 1 pergunta objetiva ao usuario: qual banco externo?',
       '',
-      '3. CARREGAR JSON DO PROJETO: aria_obter_json_projeto(id_projeto)',
-      '   - Use para entender o padrao de banco/esquema dos endpoints existentes do projeto.',
+      '   !! ID_BANCO_ESQUEMA NAO E UM SCHEMA ORACLE — SAO CONCEITOS DIFERENTES !!',
+      '   - ID_BANCO_ESQUEMA = filtro de conexao (opcional). Quando null/0, usa credencial padrao que acessa VARIOS schemas Oracle.',
+      '   - Schema Oracle (ex: STN, COSIS_MICRO) = nome que aparece no metadata como "# STN" ou "## STN.TABELA".',
+      '   - NUNCA deduza ID_BANCO_ESQUEMA a partir de um nome de schema Oracle.',
+      '     Exemplo ERRADO: usuario diz "STN" -> modelo preenche ID_BANCO_ESQUEMA=22. ISSO E ERRADO.',
+      '   - Copie ID_BANCO_ESQUEMA de outro endpoint existente do mesmo projeto. Se nao houver, deixe null/0.',
+      '   - Para descobrir quais schemas Oracle o banco expoe, chame aria_obter_metadados(p_id_banco_externo) sem ID_BANCO_ESQUEMA.',
       '',
-      '4. CARREGAR CAMPOS OBRIGATORIOS: aria_obter_itens_apex()',
+      '3. IDENTIFICAR TABELAS NECESSARIAS',
+      '   - Use a lista "TABELAS DISPONIVEIS NOS METADADOS" do contexto.',
+      '   - Filtre pelo assunto do pedido (ex: "usuarios" -> USUARIO, USUARIOS, USER).',
+      '   - NUNCA use o nome do projeto como criterio (ex: nao escolha MICROSERVICO para "usuarios" porque o projeto se chama MICRO).',
+      '   - Se nao encontrar tabela compativel, informe ao usuario e pergunte de qual banco/schema carregar.',
+      '   - Neste caso, chame aria_obter_metadados(p_id_banco_externo [, p_id_banco_esquema]) para obter a lista completa.',
       '',
-      '5. DECIDIR BANCO E ESQUEMA',
-      '   - ID_BANCO_EXTERNO: deduzido das LOVs e dos endpoints existentes do projeto.',
-      '   - ID_BANCO_ESQUEMA: OPCIONAL. So preencha se houver evidencia clara (endpoints existentes do projeto ja usam esse esquema, ou usuario pediu explicitamente).',
-      '   - Se nao houver evidencia, omita ID_BANCO_ESQUEMA — NAO use fallback fixo.',
+      '4. OBTER COLUNAS: aria_obter_colunas_metadados(p_id_banco_externo, tabela [, schema, p_id_banco_esquema])',
+      '   - Chame para CADA tabela que sera usada no codigo.',
+      '   - NAO escreva nenhum codigo antes de concluir esta etapa para todas as tabelas.',
       '',
-      '6. CARREGAR METADADOS: aria_obter_metadados(p_id_banco_externo [, p_id_banco_esquema, schema_preferido, termos_busca])',
-      '   - OBRIGATORIO antes de qualquer proposta de SQL.',
-      '   - Informe termos_busca com palavras-chave do assunto do endpoint para ajudar no ranking de tabelas.',
-      '   - Se o projeto usa schema especifico, informe schema_preferido.',
-      '   - Apos carregar metadados, va DIRETO para a inferencia hierarquica de schema -> tabela -> colunas/FKs e so entao para a proposta completa.',
-      '   - NAO emita mensagem intermediaria como "metadados carregados" ou "agora posso propor".',
-      '   - Fluxo correto: executa tools silenciosamente -> apresenta proposta completa ao usuario.',
-      '   - Se o schema ainda estiver incerto, use aria_obter_esquemas_metadados para listar os schemas em memoria.',
-      '   - Depois use aria_obter_tabelas_metadados para listar as tabelas do schema escolhido.',
-      '   - Por fim use aria_obter_colunas_metadados para confirmar colunas e FKs da tabela escolhida.',
-      '   - Nunca pule do catalogo bruto direto para o SQL se houver duvida de schema/tabela.',
+      '5. ESCREVER O CODIGO (SQL / PL/SQL / Python)',
+      '   - Veja as secoes de regras abaixo.',
+      '   - Execute tools silenciosamente. NAO emita mensagem intermediaria entre tool calls.',
+      '',
+      '6. APRESENTAR PROPOSTA — GUARDRAIL OBRIGATORIO:',
+      '   !! PROIBIDO apresentar so o codigo sem os campos do endpoint. !!',
+      '   !! PROIBIDO apresentar so os campos do endpoint sem o codigo. !!',
+      '   SEMPRE mostre juntos em uma unica resposta:',
+      '     a) O codigo completo (TX_CODIGO)',
+      '     b) TODOS os campos do endpoint: NO_REST_CUSTOM, TX_PATH, ID_METODO, NO_METODO, ID_TIPO_CODIGO,',
+      '        ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, e demais campos relevantes.',
+      '   Peca confirmacao do usuario 1 vez.',
+      '',
+      '7. APOS CONFIRMACAO DO USUARIO:',
+      '   - Chame aria_importar_json_endpoint(id_projeto, endpoint) passando:',
+      '     * id_projeto: o ID DO PROJETO (NUNCA o ID_BANCO_EXTERNO ou ID_BANCO_ESQUEMA)',
+      '     * endpoint: o objeto JSON do endpoint (REST_CUSTOM) que foi proposto e confirmado',
+      '   - O backend busca o projeto completo, preserva endpoints existentes e faz merge automatico.',
+      '   - Voce NAO precisa chamar aria_obter_json_projeto — a tool faz isso internamente.',
+      '   - Para endpoint novo: ID_REST_CUSTOM = 0. Para edicao: ID_REST_CUSTOM = ID existente.',
+      '',
+      '   !! ATENCAO: a tool aria_importar_json_endpoint SO ESTA DISPONIVEL APOS O USUARIO CONFIRMAR. !!',
+      '   !! Se voce tentar chamar antes da confirmacao, a tool NAO estara acessivel. !!',
+      '   !! PRIMEIRO: mostre proposta completa (codigo + campos). DEPOIS: aguarde confirmacao. !!',
+      '   !! SO ENTAO: chame aria_importar_json_endpoint. !!',
       '',
       '════════════════════════════════════════',
-      '## COMO LER O ARQUIVO DE METADADOS',
+      '## COMO LER OS METADADOS DE COLUNAS',
       '════════════════════════════════════════',
       '',
-      'O arquivo retornado e Markdown estruturado hierarquicamente:',
+      'O resultado de aria_obter_colunas_metadados e Markdown estruturado:',
       '',
       '  # NOME_SCHEMA',
-      '      Inicia um bloco de schema. Todas as tabelas seguintes pertencem a este schema ate o proximo #.',
+      '      Inicia um bloco de schema.',
       '',
-      '  ## SCHEMA.NOME_TABELA  [comentario opcional da tabela]',
-      '      Define uma tabela. As linhas seguintes sao as colunas DESTA tabela ate o proximo ##.',
+      '  ## SCHEMA.NOME_TABELA  [comentario opcional]',
+      '      Define uma tabela.',
       '',
-      '  - NOME_COLUNA TIPO_DADO  [comentario opcional da coluna]',
-      '      Define uma coluna da tabela atual. NOME_COLUNA e o nome exato a ser usado em SQL.',
+      '  - NOME_COLUNA TIPO_DADO  [comentario opcional]',
+      '      Define uma coluna da tabela atual. NOME_COLUNA e o nome exato a usar no SQL.',
       '',
       '  - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
-      '      Define uma chave estrangeira da tabela atual.',
+      '      Chave estrangeira da tabela atual.',
       '',
       'REGRAS DE INTERPRETACAO:',
-      '  - Hierarquia obrigatoria: schema (#) > tabela (##) > colunas/FKs (-).',
+      '  - Hierarquia: schema (#) > tabela (##) > colunas/FKs (-).',
       '  - Uma coluna pertence SOMENTE a tabela do ultimo ## lido antes dela.',
       '  - NUNCA atribua coluna a tabela diferente da que ela esta listada.',
-      '  - Se o contexto do projeto trouxer um SCHEMA LOCK, ele e a verdade local para esse pedido.',
-      '  - NUNCA use tabela de outro schema quando o SCHEMA LOCK apontar um schema diferente.',
+      '  - Se o contexto trouxer SCHEMA SUGERIDO, use-o como preferencia quando o schema nao for especificado.',
       '',
       '════════════════════════════════════════',
-      '## COMO ESCOLHER TABELA E ESCREVER SQL',
+      '## SELECAO DE TABELA E ESCRITA DO CODIGO',
       '════════════════════════════════════════',
       '',
-      'SELECAO DE TABELA — siga esta ordem de prioridade:',
-      '  1. Match exato do nome da tabela com o assunto pedido (ex: pedido "metodos" -> tabela METODO ou METODOS).',
-      '  2. Se houver schema_preferido, priorize tabelas nesse schema.',
-      '  3. Se nao encontrar match exato e houver mais de uma candidata plausivel, PARE e pergunte ao usuario qual tabela usar.',
-      '  4. NUNCA escolha tabela por aproximacao semantica fraca sem confirmar com o usuario.',
+      'SELECAO DE TABELA — ordem de prioridade:',
+      '  1. Match exato do nome da tabela com o assunto pedido (ex: "metodos" -> METODO ou METODOS).',
+      '  2. Se houver SCHEMA SUGERIDO, priorize tabelas nesse schema.',
+      '  3. Se mais de uma candidata plausivel, PARE e pergunte ao usuario.',
+      '  4. NUNCA escolha tabela por aproximacao semantica fraca sem confirmar.',
       '',
       'SELECAO DE COLUNAS — regras absolutas:',
       '  - Use SOMENTE colunas listadas no bloco ## da tabela escolhida.',
-      '  - Verifique o nome exato de cada coluna no arquivo antes de usa-la.',
-      '  - NUNCA invente coluna por semelhanca com o nome da tabela ou semantica (ex: se nao existe ds_metodo na tabela, nao use).',
-      '  - Se a tabela nao tiver colunas suficientes para o pedido, diga ao usuario o que esta faltando.',
+      '  - Verifique o nome exato antes de usar.',
+      '  - NUNCA invente coluna.',
+      '  - Se faltar coluna para o pedido, diga ao usuario.',
       '',
       'JOINS — regra unica:',
-      '  - JOIN so e permitido quando houver uma FK explicita no arquivo ligando as duas tabelas.',
-      '  - Formato do FK: - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
-      '  - Se nao houver FK declarada entre as tabelas, NAO faca JOIN. Explique a limitacao ao usuario.',
-      '  - Nunca assuma relacionamento por semelhanca de nome de coluna.',
+      '  - JOIN so e permitido quando houver FK explicita no arquivo.',
+      '  - Formato: - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
+      '  - Sem FK declarada, NAO faca JOIN.',
       '',
       'ESCRITA DO SQL — REGRAS INVIOLAVEIS:',
-      '  !! PROIBIDO: SELECT * ou SELECT tabela.* em qualquer situacao. Sem excecao.',
-      '  - Liste TODAS as colunas do SELECT de forma explicita e atribua ALIASES MNEMÔNICOS: use `AS "alias"`, `AS alias` ou a forma abreviada `COLUNA "alias"`.',
-      '    O alias definido e o NOME que sera usado no JSON de resposta (ex: `m.ID_MICRO as "idMicro"`).',
-      '  - Alias obrigatorio em TODAS as colunas do SELECT, inclusive da tabela principal. Exemplo valido: `P.ID_PROJETO "id"`, `P.NO_PROJETO "nome"`.',
-      '  - Exemplo invalido: `P.ID_PROJETO` (sem alias) e `O.NO_ORIGEM AS ORIGEM` (alias nao mnemônico igual ao nome da coluna).',
-      '  - O alias SERA o nome do campo no JSON de resposta da API. Use obrigatoriamente camelCase ENTRE ASPAS DUPLAS: AS "idProjeto".',
-      '    Essa regra vale apenas para endpoints novos incluidos pela IA; endpoints existentes editados podem preservar o alias atual.',
-      '     Exemplo: m.ID_MICRO AS "idMicro", m.NO_MICRO AS "nomeMicro"',
-      '  - NUNCA coloque aspas duplas em tabelas, schemas ou colunas. Aspas duplas sao permitidas somente nos aliases, por exemplo: `p.ID_PROJETO AS "idProjeto"`.',
-      '  - NUNCA escreva `"p"."ID_PROJETO"` nem `"COSIS_SISGP"."PROJETO"`. Use `p.ID_PROJETO AS "idProjeto"`. Isso é muito importante. Muito importante mesmo.',
-      '  - Use o nome qualificado SCHEMA.TABELA nas clausulas FROM/JOIN.',
-      '  - Nao inclua coluna cuja existencia voce nao confirmou no bloco ## da tabela nos metadados.',
+      '  !! PROIBIDO: SELECT * ou SELECT tabela.* em qualquer situacao. !!',
+      '  - Liste TODAS as colunas explicitamente com alias camelCase ENTRE ASPAS DUPLAS.',
+      '    Exemplo: m.ID_MICRO AS "idMicro", m.NO_MICRO AS "nomeMicro"',
+      '  - Alias obrigatorio em TODAS as colunas. Nunca deixe coluna sem alias.',
+      '  - NUNCA use alias igual ao nome bruto da coluna (ex: AS ORIGEM). Use camelCase entre aspas duplas.',
+      '  - NUNCA coloque aspas duplas em tabelas, schemas ou colunas.',
+      '  - NUNCA escreva `"p"."ID_PROJETO"` nem `"SCHEMA"."TABELA"`. Use `p.ID_PROJETO AS "idProjeto"`.',
+      '  - Use SCHEMA.TABELA nas clausulas FROM/JOIN.',
+      '  - NUNCA termine SQL puro com ponto e virgula (;).',
+      '',
+      '════════════════════════════════════════',
+      '## PL/SQL — REGRAS OBRIGATORIAS (tipo PLSQL)',
+      '════════════════════════════════════════',
+      '',
+      'ITERACAO:',
+      '  !! PROIBIDO cursor explicito (CURSOR c IS ...; OPEN c; FETCH c; CLOSE c). !!',
+      '  SEMPRE use: FOR rec IN (SELECT col1, col2 FROM schema.tabela WHERE ...) LOOP ... END LOOP;',
+      '',
+      'JSON:',
+      '  - Use OBRIGATORIAMENTE funcoes nativas Oracle: JSON_OBJECT, JSON_ARRAY, JSON_ARRAYAGG.',
+      '  - NUNCA construa JSON por concatenacao de strings.',
+      '',
+      'VARIAVEIS IMPLICITAS — NAO DECLARE, USE DIRETAMENTE:',
+      '  - `aria_output` (SEM dois pontos): aria_output := valor;',
+      "    Correto: aria_output := JSON_OBJECT(...); | ERRADO: :aria_output := ...",
+      '  - `:request_body`, `:aria_perfis_usuario`, `:aria_id_usuario`, `:aria_login_usuario`, `:aria_email_usuario` (COM dois pontos).',
+      "    Uso de perfis: 'Administrador' member of apex_string.split(:aria_perfis_usuario, ':')",
       '',
       '════════════════════════════════════════',
       '## PARA CRIAR ENDPOINT',
       '════════════════════════════════════════',
       '',
-      '- Deduza o maximo do contexto (endpoints existentes, LOVs, metadados) antes de perguntar qualquer coisa.',
-      '- Defaults sensiveis: NO_REST_CUSTOM derivado do assunto, TX_PATH em slug lowercase, ID_METODO=GET, ID_TIPO_CODIGO=SQL.',
-      '- Se precisar perguntar, faca 1 pergunta objetiva por vez — nunca questionario.',
-      '- Monte proposta completa de uma vez (nome, caminho, metodo, banco/esquema, SQL, descricao).',
-      '- Resposta invalida: retornar apenas SQL sem os demais campos do endpoint para confirmacao.',
-      '- Peca confirmacao 1 vez. Apos resposta afirmativa, execute sem nova confirmacao.',
+      '- Deduza o maximo do contexto antes de perguntar.',
+      '- Defaults: NO_REST_CUSTOM derivado do assunto, TX_PATH em slug lowercase, ID_METODO=GET, ID_TIPO_CODIGO=SQL.',
+      '- Se precisar perguntar, faca 1 pergunta objetiva por vez.',
       '',
       'JSON do endpoint:',
       '  - ID_REST_CUSTOM = 0 para endpoint novo.',
-      '  - Inclua o projeto completo (todos os campos) no objeto raiz; nao envie apenas ID_PROJETO.',
-      '  - TX_PATH do projeto vem do gerar-json; NUNCA comeca com /.',
-      '  - PROJETO = array com { TX_PATH, CO_SISTEMA }.',
-      '  - Arrays nao usados = [].',
-      '',
-      '  Chame: aria_importar_json({ "registros": [<projeto_completo_com_apenas_o_endpoint_em_REST_CUSTOM>] })',
+      '  - Envie SOMENTE o objeto do endpoint (REST_CUSTOM), NAO o projeto inteiro.',
+      '  - Chame: aria_importar_json_endpoint({ id_projeto: <id>, endpoint: { ID_REST_CUSTOM: 0, NO_REST_CUSTOM: ..., TX_CODIGO: ..., ... } })',
+      '  - O backend busca o projeto, preserva endpoints existentes e faz merge automatico.',
+      '  - NAO chame aria_obter_json_projeto para criar — a tool faz isso internamente.',
       '',
       '════════════════════════════════════════',
       '## PARA EDITAR ENDPOINT',
       '════════════════════════════════════════',
       '',
-      '- Identifique o endpoint pelo JSON do projeto (passo 3).',
-      '- Se houver mudanca de SQL, execute aria_obter_metadados antes da proposta.',
-      '- Monte JSON com o projeto completo e apenas o endpoint editado em REST_CUSTOM.',
-      '- Mostre alteracoes, peca confirmacao 1 vez, execute.',
+      '- Se houver mudanca de SQL, chame aria_obter_colunas_metadados antes da proposta.',
+      '- Mostre codigo + todos os campos do endpoint, peca confirmacao 1 vez.',
+      '- Apos confirmacao, chame aria_importar_json_endpoint({ id_projeto, endpoint }) com o ID_REST_CUSTOM do endpoint existente.',
+      '- O backend busca o projeto e faz merge automatico.',
       '',
       '════════════════════════════════════════',
       '## REGRAS ABSOLUTAS',
       '════════════════════════════════════════',
       '',
-      '- NUNCA invente tabela, coluna, schema ou FK que nao existam no arquivo de metadados.',
-      '- NUNCA faca JOIN sem FK declarada no arquivo de metadados entre as tabelas envolvidas.',
-      '- NUNCA use SELECT * ou SELECT tabela.*. Sempre liste colunas com alias camelCase ENTRE ASPAS DUPLAS: AS "nomeCampo".',
+      '- NUNCA invente tabela, coluna, schema ou FK.',
+      '- NUNCA faca JOIN sem FK declarada.',
+      '- NUNCA use SELECT * ou tabela.*.',
       '- NUNCA deixe coluna sem alias no SELECT.',
-      '- NUNCA use alias igual ao nome bruto da coluna (ex: ORIGEM, NO_PROJETO). Use alias de resposta JSON em camelCase e entre aspas duplas (ex: AS "origem", AS "nomeProjeto").',
-      '- NUNCA termine SQL puro com ponto e virgula (;). O banco executa internamente; ; causa erro de syntax. (PL/SQL e Python podem usar ; normalmente.)',
-      '- NUNCA emita mensagem intermediaria entre chamadas de tools e a proposta final ao usuario.',
+      '- NUNCA use alias igual ao nome bruto da coluna.',
+      '- NUNCA termine SQL puro com ;.',
+      '- NUNCA emita mensagem intermediaria entre tool calls e a proposta final.',
       '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
-      '- NUNCA chame aria_importar_json sem confirmacao explicita do usuario.',
+      '- NUNCA chame aria_importar_json_endpoint sem confirmacao explicita do usuario.',
+      '- NUNCA pule a etapa de confirmacao — SEMPRE mostre a proposta completa e espere o usuario dizer sim.',
       '- NUNCA faca questionario; deduza e pergunte apenas o indispensavel.',
+      '- SEMPRE apresente codigo + campos do endpoint juntos na proposta. Nunca um sem o outro.',
       '- Se uma tool retornar erro, nao repita com os mesmos parametros; informe o usuario.',
-      '- Documente sempre: DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, VARIABLE[].TX_DESCRICAO.',
+      '- Documente: DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, VARIABLE[].TX_DESCRICAO.',
+      '- Em PL/SQL: FOR rec IN (...) LOOP obrigatorio. Cursor explicito proibido.',
+      '- Em PL/SQL: aria_output sem dois pontos. Demais variaveis ARIA com dois pontos.',
+      '- Em PL/SQL: JSON nativo Oracle. Nunca concatenacao.',
       '',
       '## JSON SCHEMA DO REST_CUSTOM:',
       REST_CUSTOM_SCHEMA_STR
@@ -2927,6 +3483,124 @@ export function activate(context: vscode.ExtensionContext): void {
 
     if (schemaLockText) {
       messages.push(vscode.LanguageModelChatMessage.User(schemaLockText));
+    }
+
+    if (lovsJson) {
+      messages.push(vscode.LanguageModelChatMessage.User(
+        `CONTEXTO - LOVs (valores de referencia para campos ID_ e NO_):\n${lovsJson}`
+      ));
+    }
+
+    if (formItemsJson) {
+      messages.push(vscode.LanguageModelChatMessage.User(
+        `CONTEXTO - Campos obrigatorios do formulario de endpoint:\n${formItemsJson}`
+      ));
+    }
+
+    // Injeta lista compacta de tabelas disponiveis nos metadados persistidos em disco
+    // e registra os arquivos no cache em memoria para evitar re-chamadas a API
+    try {
+      const metadataDir = path.join(__dirname, '..', 'resources');
+
+      // Busca proativa: carrega metadados das conexoes (banco_externo/esquema) JA USADAS em
+      // endpoints do projeto identificado. Nao carrega conexoes de outros projetos nem todas
+      // as conexoes do sistema. Se o projeto nao tiver conexoes de banco externo, o modelo
+      // vai perguntar ao usuario qual usar.
+      const projectBancos = new Set<string>();
+      {
+        const projectForMetadata = projetosRegistros.find((p) => p.ID_PROJETO === preloadedProjectId);
+        for (const ep of (projectForMetadata?.REST_CUSTOM ?? [])) {
+          const idBancoExterno = toNumber(ep.ID_BANCO_EXTERNO);
+          const idBancoEsquema = toNumber(ep.ID_BANCO_ESQUEMA);
+          if (!(idBancoExterno > 0)) { continue; }
+          projectBancos.add(buildMetadataKey(idBancoExterno, idBancoEsquema > 0 ? idBancoEsquema : undefined));
+        }
+
+        if (projectBancos.size === 0) {
+          output.appendLine(`[${new Date().toISOString()}] Nenhuma conexao de banco externo nos endpoints do projeto — modelo perguntara ao usuario.`);
+        } else {
+          for (const metadataKey of projectBancos) {
+            const keyParts = metadataKey.split(':');
+            const idBancoExterno = Number(keyParts[0]);
+            const idBancoEsquema = keyParts[1] !== 'sem-esquema' ? Number(keyParts[1]) : undefined;
+            if (!(idBancoExterno > 0)) { continue; }
+            const fileName = idBancoEsquema && idBancoEsquema > 0
+              ? `metadata-${idBancoExterno}-${idBancoEsquema}.aria.txt`
+              : `metadata-${idBancoExterno}.aria.txt`;
+            const filePath = path.join(metadataDir, fileName);
+            const diskExists = await fs.promises.access(filePath).then(() => true).catch(() => false);
+            if (!diskExists) {
+              try {
+                response.progress(`Carregando metadados ${metadataKey}...`);
+                const pseudoEndpoint: AriaEndpoint = {
+                  ID_REST_CUSTOM: 0,
+                  NO_REST_CUSTOM: '',
+                  TX_PATH: '',
+                  ID_BANCO_EXTERNO: idBancoExterno,
+                  ...(idBancoEsquema && idBancoEsquema > 0 ? { ID_BANCO_ESQUEMA: idBancoEsquema } : {})
+                };
+                const metadata = await client.getEndpointMetadata(pseudoEndpoint);
+                if (metadata) {
+                  await fs.promises.mkdir(metadataDir, { recursive: true });
+                  await fs.promises.writeFile(filePath, metadata, 'utf8');
+                  output.appendLine(`[${new Date().toISOString()}] Metadata buscado e salvo: ${metadataKey} (${fileName})`);
+                }
+              } catch {
+                // ignora falha na busca proativa de um banco especifico
+              }
+            }
+          }
+        }
+      }
+
+      // Percorre todos os arquivos de disco: registra no cache de URI e extrai tabelas
+      // somente das conexoes do projeto identificado.
+      const entries = await fs.promises.readdir(metadataDir).catch(() => [] as string[]);
+      const metadataFiles = entries.filter((f) => f.startsWith('metadata-') && f.endsWith('.aria.txt'));
+      const allTables: string[] = [];
+      for (const fileName of metadataFiles) {
+        const filePath = path.join(metadataDir, fileName);
+        const content = await fs.promises.readFile(filePath, 'utf8').catch(() => '');
+        if (content) {
+          const nameWithoutExt = fileName.replace('.aria.txt', '').replace('metadata-', '');
+          const parts = nameWithoutExt.split('-');
+          const idBancoExterno = Number(parts[0]);
+          const idBancoEsquema = parts.length > 1 ? Number(parts[1]) : undefined;
+          if (idBancoExterno > 0) {
+            const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
+            // Registra URI no cache para que aria_obter_metadados nao re-chame a API
+            if (!metadataUriByEndpoint.has(metadataKey)) {
+              metadataUriByEndpoint.set(metadataKey, vscode.Uri.file(filePath));
+              output.appendLine(`[${new Date().toISOString()}] Metadata pre-carregado do disco: ${metadataKey} (${fileName})`);
+            }
+            // Extrai tabelas somente das conexoes do projeto identificado
+            if (projectBancos.has(metadataKey)) {
+              allTables.push(...extractMetadataTableNames(content));
+            }
+          }
+        }
+      }
+      const uniqueTables = Array.from(new Set(allTables)).sort();
+      if (uniqueTables.length > 0) {
+        output.appendLine(`[${new Date().toISOString()}] Tabelas injetadas no contexto: ${uniqueTables.length} tabelas de ${projectBancos.size} conexao(oes)`);
+        messages.push(vscode.LanguageModelChatMessage.User(
+          `TABELAS DISPONIVEIS NOS METADADOS (formato SCHEMA.TABELA):\n${uniqueTables.join('\n')}\n\n` +
+          `Identifique quais tabelas sao necessarias para o pedido do usuario e chame aria_obter_colunas_metadados para cada uma delas.`
+        ));
+      } else if (projectBancos.size === 0) {
+        // Projeto sem conexoes de banco externo: instrui o modelo a perguntar ao usuario
+        messages.push(vscode.LanguageModelChatMessage.User(
+          `AVISO: O projeto identificado nao possui endpoints com banco externo definido.\n` +
+          `Pergunte ao usuario qual banco externo (ID_BANCO_EXTERNO) usar. ` +
+          `NAO pergunte sobre ID_BANCO_ESQUEMA — esse campo e opcional e sera inferido dos endpoints existentes ou deixado null. ` +
+          `Apos obter o ID_BANCO_EXTERNO, chame aria_obter_metadados(p_id_banco_externo) sem ID_BANCO_ESQUEMA ` +
+          `para descobrir os schemas Oracle disponiveis no banco.`
+        ));
+      } else {
+        output.appendLine(`[${new Date().toISOString()}] Aviso: nenhuma tabela extraida dos arquivos de metadados (${projectBancos.size} conexao(oes))`);
+      }
+    } catch {
+      // ignora silenciosamente se o diretorio de recursos nao existir
     }
 
     // Adiciona historico da conversa
@@ -2971,15 +3645,22 @@ export function activate(context: vscode.ExtensionContext): void {
       const directMutationIntent = hasEndpoint && hasMutationVerb;
 
       const isAffirmative = isAffirmativeConfirmationPrompt(prompt);
-      const hasPendingEndpointProposal =
-        /\b(proposta do endpoint|sql final|nome do endpoint|tx_path|id_banco_externo|confirme se deseja prosseguir)\b/.test(chatHistoryAssistantText) ||
-        /\b(endpoint|sql|tx_codigo|rest_custom)\b/.test(chatHistoryAssistantText);
-      const hasReadyPendingEndpointProposal = isEndpointProposalReadyForImport(lastAssistantResponseText);
+      const hasEndpointProposalInContext = hasEndpointProposalContext(lastAssistantResponseText) || looksLikeEndpointProposalWithoutSql(lastAssistantResponseText);
 
-      return directMutationIntent || (isAffirmative && (hasReadyPendingEndpointProposal || hasPendingEndpointProposal));
+      return directMutationIntent || (isAffirmative && hasEndpointProposalInContext);
     })();
 
     const isAffirmativeReply = isAffirmativeConfirmationPrompt(request.prompt);
+
+    // hasReadyPendingEndpointProposal precisa ser calculado ANTES de decidir as tools
+    const hasReadyPendingEndpointProposal = isEndpointProposalReadyForImport(lastAssistantResponseText);
+    const hasEndpointProposalInContext = hasEndpointProposalContext(lastAssistantResponseText) || looksLikeEndpointProposalWithoutSql(lastAssistantResponseText);
+
+    // A restricao de tools so acontece quando:
+    // 1) O usuario deu resposta afirmativa
+    // 2) A ULTIMA resposta do assistente tem contexto real de proposta de endpoint.
+    // Se o usuario disse "sim" fora desse contexto, mantem as tools normais.
+    const shouldRestrictToImport = isAffirmativeReply && hasEndpointProposalInContext;
     const userPromptHistory = [
       ...chatContext.history
         .filter((turn): turn is vscode.ChatRequestTurn => turn instanceof vscode.ChatRequestTurn)
@@ -2992,48 +3673,51 @@ export function activate(context: vscode.ExtensionContext): void {
     let metadataTablesListedInRequest = false;
     let metadataColumnsListedInRequest = false;
     const columnMetadataRequestedTables = new Set<string>();
+    const hasFullEndpointMetadataContext = () =>
+      metadataCalledInRequest && metadataTablesListedInRequest && metadataColumnsListedInRequest;
 
-    output.appendLine(
-      `[${new Date().toISOString()}] @aria: "${request.prompt.slice(0, 120)}", ${messages.length} msgs, ${ariaTools.length} tools`
-    );
-
-    // Quando o usuario confirma, o modelo usa tools normais MENOS as de pipeline de metadados
-    // (metadados ja foram carregados na requisicao anterior e estao em cache).
-    // O modelo pode chamar aria_obter_lovs, aria_obter_json_projeto, aria_obter_itens_apex e aria_importar_json.
-    const METADATA_PIPELINE_TOOLS = new Set([
-      'aria_obter_metadados',
-      'aria_obter_esquemas_metadados',
-      'aria_obter_tabelas_metadados',
-      'aria_obter_colunas_metadados'
+    // Calcula tools antes do log para mostrar o count correto
+    // NORMAL: modelo NAO tem acesso a import — so pode propor e pedir confirmacao
+    const TOOLS_NORMAL_FLOW = new Set<string>([
+      'aria_obter_colunas_metadados',
+      'aria_obter_json_projeto',
+      'aria_obter_metadados',         // fallback: se metadados nao estiverem em disco
+      ...(lovsJson ? [] : ['aria_obter_lovs']),  // fallback: se LOVs nao foram pre-carregadas
     ]);
 
-    const toolsForModel = (isEndpointMutationIntent && isAffirmativeReply)
-      ? ariaTools.filter((t) => !METADATA_PIPELINE_TOOLS.has(t.name))
-      : ariaTools;
+    const toolsForModel = shouldRestrictToImport
+      ? ariaTools
+      : ariaTools.filter((t) => TOOLS_NORMAL_FLOW.has(t.name));
 
-    const hasReadyPendingEndpointProposal = isEndpointProposalReadyForImport(lastAssistantResponseText);
+    output.appendLine(
+      `[${new Date().toISOString()}] @aria: "${request.prompt.slice(0, 120)}", ${messages.length} msgs, ${toolsForModel.length} tools expostas ao modelo`
+    );
+    output.appendLine(
+      `[${new Date().toISOString()}] @aria: isAffirmativeReply=${isAffirmativeReply}, hasReadyPendingEndpointProposal=${hasReadyPendingEndpointProposal}, ` +
+      `hasEndpointProposalInContext=${hasEndpointProposalInContext}, shouldRestrictToImport=${shouldRestrictToImport}, isEndpointMutationIntent=${isEndpointMutationIntent}`
+    );
 
-    if (isEndpointMutationIntent && isAffirmativeReply) {
-      output.appendLine(`[${new Date().toISOString()}] @aria: affirmative reply - tools restricted to: ${toolsForModel.map((t) => t.name).join(', ')}`);
+    if (shouldRestrictToImport) {
+      output.appendLine(`[${new Date().toISOString()}] @aria: AFFIRMATIVE FLOW — proposta completa detectada, tools restritas a: ${toolsForModel.map((t) => t.name).join(', ')}`);
       // Metadados ja estavam carregados na requisicao anterior; marcar como presentes para os guardrails
       metadataCalledInRequest = true;
       metadataSchemasListedInRequest = true;
       metadataTablesListedInRequest = true;
       metadataColumnsListedInRequest = true;
       messages.push(vscode.LanguageModelChatMessage.User(
-        hasReadyPendingEndpointProposal
-          ? 'O usuario confirmou a proposta. ' +
-            'Use o historico da conversa para montar o JSON completo do endpoint e chamar aria_importar_json. ' +
-            'Para obter o JSON completo do projeto (com todos os campos obrigatorios), chame aria_obter_json_projeto. ' +
-            'Os metadados ja estao carregados — NAO chame aria_obter_metadados nem nenhuma tool de metadados. ' +
-            'Chame aria_importar_json com o projeto completo e apenas o endpoint novo em REST_CUSTOM (ID_REST_CUSTOM = 0).'
-          : 'O usuario respondeu afirmativamente, mas a ultima proposta ainda nao estava pronta para importacao. ' +
-            'Antes de chamar aria_importar_json, corrija a proposta usando o historico: monte SQL final com aliases camelCase entre aspas duplas em todas as colunas, ' +
-            'inclua todos os campos do endpoint para confirmacao e entao gere o JSON completo do projeto. ' +
-            'Para obter o JSON completo do projeto (com todos os campos obrigatorios), chame aria_obter_json_projeto. ' +
-            'Os metadados ja estao carregados — NAO chame aria_obter_metadados nem nenhuma tool de metadados. ' +
-            'Nao peca nova confirmacao; apenas corrija internamente e execute a importacao.'
+        'O usuario confirmou a proposta abaixo. Monte o JSON do endpoint baseado nela e chame a tool.\n\n' +
+        '--- PROPOSTA CONFIRMADA ---\n' +
+        lastAssistantResponseText + '\n' +
+        '--- FIM DA PROPOSTA ---\n\n' +
+        'INSTRUCOES:\n' +
+        '1. Extraia do texto acima: NO_REST_CUSTOM, TX_PATH, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, TX_CODIGO, DS_REST_CUSTOM_CURTA, TX_COMENTARIOS e demais campos.\n' +
+        '2. Monte SOMENTE o objeto do endpoint editado. NAO envie o projeto inteiro, NAO envie REST_CUSTOM com varios itens, NAO envie endpoints existentes.\n' +
+        '3. Chame aria_importar_json_endpoint({ id_projeto: <id>, endpoint: <json_do_endpoint> }).\n' +
+        '4. ID_REST_CUSTOM = 0 para endpoint novo, ou o ID existente para edicao.\n' +
+        '5. NAO chame nenhuma outra tool. NAO peca nova confirmacao.'
       ));
+    } else if (isEndpointMutationIntent && isAffirmativeReply && !hasReadyPendingEndpointProposal) {
+      output.appendLine(`[${new Date().toISOString()}] @aria: usuario confirmou mas proposta NAO esta completa — mantendo tools normais`);
     }
 
     for (let iteration = 0; iteration < 10 && !token.isCancellationRequested; iteration++) {
@@ -3070,8 +3754,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         if (
-          isEndpointMutationIntent &&
-          isAffirmativeReply &&
+          shouldRestrictToImport &&
           /(confirme|confirmacao|deseja prosseguir|posso prosseguir|quer que eu prossiga|prosseguir\?)/.test(bufferedTextLower)
         ) {
           output.appendLine(
@@ -3079,7 +3762,21 @@ export function activate(context: vscode.ExtensionContext): void {
           );
 
           messages.push(vscode.LanguageModelChatMessage.User(
-            'O usuario ja confirmou. Nao peca nova confirmacao; execute imediatamente a operacao e reporte o resultado.'
+            'O usuario ja confirmou. Nao peca nova confirmacao; chame aria_importar_json_endpoint imediatamente com o JSON do endpoint.'
+          ));
+          continue;
+        }
+
+        // Se o usuario confirmou mas o modelo emitiu texto sem chamar a tool de import,
+        // forca-o a chamar aria_importar_json_endpoint.
+        if (shouldRestrictToImport) {
+          output.appendLine(
+            `[${new Date().toISOString()}] Guardrail: resposta bloqueada — usuario confirmou mas modelo nao chamou aria_importar_json_endpoint.`
+          );
+
+          messages.push(vscode.LanguageModelChatMessage.User(
+            'O usuario ja confirmou a proposta. Voce DEVE chamar aria_importar_json_endpoint({ id_projeto: <id>, endpoint: <json_do_endpoint> }) AGORA. ' +
+            'Extraia os dados da PROPOSTA CONFIRMADA acima e chame a tool.'
           ));
           continue;
         }
@@ -3110,17 +3807,8 @@ export function activate(context: vscode.ExtensionContext): void {
           (!metadataTablesListedInRequest || !metadataColumnsListedInRequest)
         ) {
           output.appendLine(
-            `[${new Date().toISOString()}] Guardrail: resposta bloqueada por pipeline de metadados incompleto (schema->tabela->colunas).`
+            `[${new Date().toISOString()}] Diagnostico: pipeline de metadados incompleto no turno atual (schema=${metadataSchemasListedInRequest}, tabela=${metadataTablesListedInRequest}, colunas=${metadataColumnsListedInRequest}). Prosseguindo sem bloquear.`
           );
-
-          messages.push(vscode.LanguageModelChatMessage.User(
-            'Pipeline obrigatorio para este endpoint: ' +
-            '1) aria_obter_metadados (schemas), ' +
-            '2) aria_obter_tabelas_metadados (schema escolhido), ' +
-            '3) aria_obter_colunas_metadados (tabelas selecionadas). ' +
-            'Nao conclua a proposta sem concluir os 3 niveis.'
-          ));
-          continue;
         }
 
         if (isEndpointMutationIntent) {
@@ -3159,7 +3847,25 @@ export function activate(context: vscode.ExtensionContext): void {
               .map((item) => normalizeTableRef(item))
               .filter((item) => item.length > 0);
 
-            // Alias camelCase continua sendo exigido para os novos endpoints, mas so analisamos SQL limpo.
+            const aliasIssues = analyzeSqlAliasIssues(extractedSql);
+            if (aliasIssues.missingAlias.length > 0 || aliasIssues.nonMnemonicAlias.length > 0) {
+              const problems: string[] = [];
+              if (aliasIssues.missingAlias.length > 0) {
+                problems.push(`Colunas sem alias: ${aliasIssues.missingAlias.join(', ')}`);
+              }
+              if (aliasIssues.nonMnemonicAlias.length > 0) {
+                problems.push(`Alias nao camelCase ou igual ao nome bruto: ${aliasIssues.nonMnemonicAlias.join(', ')}`);
+              }
+              output.appendLine(
+                `[${new Date().toISOString()}] Diagnostico: SQL com alias camelCase ausente/invalido. ${problems.join('. ')}`
+              );
+
+              messages.push(vscode.LanguageModelChatMessage.User(
+                'Diagnostico: o SQL atual ainda nao atende a preferencia de alias camelCase em todas as colunas. ' +
+                'Se fizer sentido para a resposta, reescreva o SQL com alias camelCase entre ASPAS DUPLAS. ' +
+                `Problemas encontrados: ${problems.join('. ')}.`
+              ));
+            }
 
             const missingColumnContext = sqlTables.filter((tableRef) => {
               const nameOnly = tableRefNameOnly(tableRef);
@@ -3179,6 +3885,19 @@ export function activate(context: vscode.ExtensionContext): void {
             }
 
             if (!isEndpointProposalCompleteForConfirmation(bufferedText)) {
+              if (hasFullEndpointMetadataContext()) {
+                output.appendLine(
+                  `[${new Date().toISOString()}] Guardrail: contexto completo de endpoint disponivel, mas resposta ainda parcial. Forcando proposta final unica.`
+                );
+
+                messages.push(vscode.LanguageModelChatMessage.User(
+                  'Voce ja tem tabelas, colunas e metadados suficientes no contexto. ' +
+                  'Reescreva agora UMA UNICA resposta final e completa, sem etapas intermediarias, sem resumir por partes e sem pedir mais dados. ' +
+                  'Inclua o codigo completo do endpoint (SQL, PL/SQL ou Python, conforme o caso), todos os campos do endpoint e a pergunta unica de confirmacao apenas no final.'
+                ));
+                continue;
+              }
+
               output.appendLine(
                 `[${new Date().toISOString()}] Guardrail: resposta SQL bloqueada por proposta incompleta (faltam campos do endpoint para confirmacao).`
               );
@@ -3186,8 +3905,9 @@ export function activate(context: vscode.ExtensionContext): void {
               messages.push(vscode.LanguageModelChatMessage.User(
                 'Proposta incompleta para confirmacao do usuario. Reescreva incluindo TODOS os itens: ' +
                 'Nome do Endpoint, Caminho (TX_PATH), Metodo HTTP, Tipo de Codigo/Linguagem, Banco Externo, Esquema, ' +
-                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, SQL completo (SELECT ... FROM ...) com aliases camelCase entre aspas duplas em TODAS as colunas e pergunta unica de confirmacao. ' +
-                'O SQL nao deve terminar com ponto e virgula (;).'
+                'DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, codigo completo do endpoint (SQL, PL/SQL ou Python, conforme o caso) ' +
+                'e pergunta unica de confirmacao. ' +
+                'Nao responda em conta-gotas.'
               ));
               continue;
             }
@@ -3244,12 +3964,13 @@ export function activate(context: vscode.ExtensionContext): void {
               const metadataText = await fs.promises.readFile(cachedUri.fsPath, 'utf8').catch(() => undefined);
               const schemas = metadataText ? listMetadataSchemas(metadataText) : [];
               const schemaSummary = schemas.length > 0 ? schemas.map((s) => `- ${s}`).join('\n') : '(nenhum schema detectado)';
+              const allTables = metadataText ? extractMetadataTableNames(metadataText) : [];
+              const tableList = allTables.length > 0 ? allTables.sort().join('\n') : '(nenhuma tabela detectada)';
               const msg =
                 `Metadados ja carregados em: ${cachedUri.fsPath}\n\n` +
-                `Resumo (nivel 1 - schemas):\n${schemaSummary}\n\n` +
-                'Proximo passo obrigatorio (nivel 2): chame aria_obter_tabelas_metadados para o schema escolhido.\n' +
-                'Depois (nivel 3): chame aria_obter_colunas_metadados para cada tabela selecionada.\n' +
-                'Nao escreva SQL antes de concluir os niveis 2 e 3.';
+                `Schemas disponiveis:\n${schemaSummary}\n\n` +
+                `Tabelas disponiveis (SCHEMA.TABELA):\n${tableList}\n\n` +
+                'Proximo passo obrigatorio: chame aria_obter_colunas_metadados para a(s) tabela(s) do assunto antes de escrever qualquer codigo.';
 
               toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, [
                 new vscode.LanguageModelTextPart(msg)
@@ -3274,12 +3995,12 @@ export function activate(context: vscode.ExtensionContext): void {
             token
           );
 
-          if (toolCall.name === 'aria_importar_json') {
+          if (toolCall.name === 'aria_importar_json' || toolCall.name === 'aria_importar_json_endpoint') {
             const importText = extractToolResultText(result.content);
             finalizedAfterImport = true;
             finalizedAfterImportMessage = importText || 'Importacao processada.';
             toolResults.push(new vscode.LanguageModelToolResultPart(toolCall.callId, result.content));
-            output.appendLine(`[${new Date().toISOString()}] Guardrail: encerrando fluxo apos aria_importar_json para evitar novas chamadas de metadados.`);
+            output.appendLine(`[${new Date().toISOString()}] Guardrail: encerrando fluxo apos ${toolCall.name} para evitar novas chamadas.`);
             break;
           }
 
@@ -3335,9 +4056,9 @@ export function activate(context: vscode.ExtensionContext): void {
         metadataCalledInRequest &&
         (!metadataTablesListedInRequest || !metadataColumnsListedInRequest)
       ) {
-        messages.push(vscode.LanguageModelChatMessage.User(
-          'Ainda falta concluir o pipeline de metadados: execute aria_obter_tabelas_metadados e aria_obter_colunas_metadados antes da proposta final.'
-        ));
+        output.appendLine(
+          `[${new Date().toISOString()}] Diagnostico: resposta do modelo ocorreu com pipeline de metadados incompleto (schema=${metadataSchemasListedInRequest}, tabela=${metadataTablesListedInRequest}, colunas=${metadataColumnsListedInRequest}).`
+        );
       }
     }
   });
@@ -3990,10 +4711,10 @@ function buildProjectSchemaLockSummary(projects: AriaProject[], prompt: string):
   const projectRef = projectPath ? `${projectLabel} [${projectPath}]` : projectLabel;
 
   if (schemas.length === 0) {
-    return `SCHEMA LOCK: projeto ${projectRef} nao teve schema identificado no contexto. Nao misture schemas e pergunte se precisar decidir entre tabelas de schemas diferentes.`;
+    return `SCHEMA SUGERIDO: projeto ${projectRef} nao teve schema identificado nos endpoints existentes. Use o schema que o usuario indicar ou que o metadata apontar como mais adequado.`;
   }
 
-  return `SCHEMA LOCK: projeto ${projectRef} -> schemas permitidos neste pedido: ${schemas.join(', ')}. Use somente tabelas desses schemas. Se uma tabela candidata estiver em outro schema, descarte-a.`;
+  return `SCHEMA SUGERIDO: projeto ${projectRef} usa predominantemente: ${schemas.join(', ')}. Prefira tabelas desses schemas quando o schema nao for especificado. Se o usuario pedir explicitamente outro schema, ou se o assunto do endpoint pertencer claramente a outro schema acessivel pela mesma conexao de banco, use o schema correto sem restricao.`;
 }
 
 function extractTableColumns(full: string, tableKey: string): string | undefined {
