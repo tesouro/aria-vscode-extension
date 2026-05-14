@@ -157,6 +157,148 @@ type EditMarker =
   | { type: 'endpointJson'; id: number; projectId: number }
   | { type: 'endpointCode'; id: number; projectId: number };
 
+const ARIA_EDIT_SCHEME = 'aria-edit';
+
+interface VirtualEditDocumentEntry {
+  content: Uint8Array;
+  ctime: number;
+  mtime: number;
+}
+
+class InMemoryEditFileSystemProvider implements vscode.FileSystemProvider {
+  private readonly documents = new Map<string, VirtualEditDocumentEntry>();
+  private readonly changeEmitter = new vscode.EventEmitter<vscode.FileChangeEvent[]>();
+
+  public readonly onDidChangeFile = this.changeEmitter.event;
+
+  public stat(uri: vscode.Uri): vscode.FileStat {
+    if (this.isRoot(uri)) {
+      const now = Date.now();
+      return { type: vscode.FileType.Directory, ctime: now, mtime: now, size: 0 };
+    }
+
+    const entry = this.getEntry(uri);
+    return {
+      type: vscode.FileType.File,
+      ctime: entry.ctime,
+      mtime: entry.mtime,
+      size: entry.content.byteLength
+    };
+  }
+
+  public readDirectory(uri: vscode.Uri): [string, vscode.FileType][] {
+    if (!this.isRoot(uri)) {
+      return [];
+    }
+
+    return Array.from(this.documents.keys())
+      .filter((item) => item.startsWith('/') && !item.slice(1).includes('/'))
+      .map((item) => [item.slice(1), vscode.FileType.File]);
+  }
+
+  public readFile(uri: vscode.Uri): Uint8Array {
+    if (this.isRoot(uri)) {
+      throw vscode.FileSystemError.FileIsADirectory(uri);
+    }
+
+    return this.getEntry(uri).content;
+  }
+
+  public writeFile(uri: vscode.Uri, content: Uint8Array, options: { create: boolean; overwrite: boolean }): void {
+    if (this.isRoot(uri)) {
+      throw vscode.FileSystemError.FileIsADirectory(uri);
+    }
+
+    const key = this.key(uri);
+    const exists = this.documents.has(key);
+    if (!options.create && !exists) {
+      throw vscode.FileSystemError.FileNotFound(uri);
+    }
+    if (!options.overwrite && exists) {
+      throw vscode.FileSystemError.FileExists(uri);
+    }
+
+    const previous = this.documents.get(key);
+    const now = Date.now();
+    this.documents.set(key, {
+      content: new Uint8Array(content),
+      ctime: previous?.ctime ?? now,
+      mtime: now
+    });
+
+    this.changeEmitter.fire([{ type: exists ? vscode.FileChangeType.Changed : vscode.FileChangeType.Created, uri }]);
+  }
+
+  public createDirectory(uri: vscode.Uri): void {
+    if (this.isRoot(uri)) {
+      return;
+    }
+
+    throw vscode.FileSystemError.NoPermissions('Directories are not supported in the ARIA edit workspace.');
+  }
+
+  public delete(uri: vscode.Uri): void {
+    if (this.isRoot(uri)) {
+      throw vscode.FileSystemError.NoPermissions('Cannot delete the ARIA edit root.');
+    }
+
+    const key = this.key(uri);
+    if (this.documents.delete(key)) {
+      this.changeEmitter.fire([{ type: vscode.FileChangeType.Deleted, uri }]);
+    }
+  }
+
+  public rename(oldUri: vscode.Uri, newUri: vscode.Uri): void {
+    if (this.isRoot(oldUri) || this.isRoot(newUri)) {
+      throw vscode.FileSystemError.NoPermissions('Cannot rename the ARIA edit root.');
+    }
+
+    const entry = this.getEntry(oldUri);
+    const oldKey = this.key(oldUri);
+    const newKey = this.key(newUri);
+    this.documents.set(newKey, { ...entry, mtime: Date.now() });
+    this.documents.delete(oldKey);
+    this.changeEmitter.fire([
+      { type: vscode.FileChangeType.Deleted, uri: oldUri },
+      { type: vscode.FileChangeType.Created, uri: newUri }
+    ]);
+  }
+
+  public watch(): vscode.Disposable {
+    return new vscode.Disposable(() => undefined);
+  }
+
+  public setContent(uri: vscode.Uri, text: string): void {
+    const key = this.key(uri);
+    const previous = this.documents.get(key);
+    const now = Date.now();
+    this.documents.set(key, {
+      content: Buffer.from(text, 'utf8'),
+      ctime: previous?.ctime ?? now,
+      mtime: now
+    });
+
+    this.changeEmitter.fire([{ type: previous ? vscode.FileChangeType.Changed : vscode.FileChangeType.Created, uri }]);
+  }
+
+  private isRoot(uri: vscode.Uri): boolean {
+    return uri.path === '/' || uri.path === '';
+  }
+
+  private key(uri: vscode.Uri): string {
+    return uri.path;
+  }
+
+  private getEntry(uri: vscode.Uri): VirtualEditDocumentEntry {
+    const entry = this.documents.get(this.key(uri));
+    if (!entry) {
+      throw vscode.FileSystemError.FileNotFound(uri);
+    }
+
+    return entry;
+  }
+}
+
 class AriaApiClient {
   public constructor(
     private readonly settings: ApiSettings,
@@ -1159,10 +1301,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const editMap = new Map<string, EditMarker>();
   const metadataUriByEndpoint = new Map<string, vscode.Uri>();
   const metadataCatalogByEndpoint = new Map<string, ParsedMetadataCatalog>();
+  const virtualEditProvider = new InMemoryEditFileSystemProvider();
   const output = vscode.window.createOutputChannel('ARIA API Editor');
 
   const tree = new AriaTreeProvider(() => dataset);
   vscode.window.registerTreeDataProvider('ariaProjectsView', tree);
+  context.subscriptions.push(
+    vscode.workspace.registerFileSystemProvider(ARIA_EDIT_SCHEME, virtualEditProvider, {
+      isCaseSensitive: true,
+      isReadonly: false
+    })
+  );
 
   const updateLoginState = async (loggedIn: boolean): Promise<void> => {
     isLoggedIn = loggedIn;
@@ -1440,6 +1589,108 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  const createVirtualEditUri = (fileName: string): vscode.Uri =>
+    vscode.Uri.from({ scheme: ARIA_EDIT_SCHEME, path: `/${fileName}` });
+
+  const openVirtualEditDocument = async (
+    fileName: string,
+    content: string,
+    language?: string
+  ): Promise<vscode.TextDocument> => {
+    const uri = createVirtualEditUri(fileName);
+    virtualEditProvider.setContent(uri, content);
+    const doc = await vscode.workspace.openTextDocument(uri);
+
+    if (language && doc.languageId !== language) {
+      await vscode.languages.setTextDocumentLanguage(doc, language);
+    }
+
+    await vscode.window.showTextDocument(doc, { preview: false });
+    return doc;
+  };
+
+  const saveEditedDocument = async (document: vscode.TextDocument): Promise<void> => {
+    const marker = editMap.get(document.uri.toString());
+    if (!marker) {
+      return;
+    }
+
+    const text = document.getText();
+    const savingIndicator = vscode.window.setStatusBarMessage('$(sync~spin) ARIA: salvando via API...');
+    try {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'ARIA: Salvando alteracoes via API...'
+        },
+        async () => {
+          await saveWithFreshDataset(`${marker.type}:${marker.id}`, marker.projectId, async (draft) => {
+            if (marker.type === 'endpointCode') {
+              let found = false;
+              for (const project of draft.registros) {
+                const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === marker.id);
+                if (eIdx >= 0) {
+                  project.REST_CUSTOM[eIdx] = { ...project.REST_CUSTOM[eIdx], TX_CODIGO: text };
+                  found = true;
+                  break;
+                }
+              }
+              if (!found) { throw new Error('Endpoint nao encontrado no cache.'); }
+              return;
+            }
+
+            if (marker.type === 'projectJson') {
+              const parsed = JSON.parse(text) as Record<string, unknown>;
+              const idx = draft.registros.findIndex((p) => p.ID_PROJETO === marker.id);
+              if (idx < 0) { throw new Error('Projeto nao encontrado no cache.'); }
+              draft.registros[idx] = {
+                ...draft.registros[idx],
+                ...parsed,
+                ID_PROJETO: marker.id,
+                REST_CUSTOM: (parsed.REST_CUSTOM as AriaEndpoint[]) || draft.registros[idx].REST_CUSTOM
+              };
+              return;
+            }
+
+            const parsed = JSON.parse(text) as Record<string, unknown>;
+            let found = false;
+            for (const project of draft.registros) {
+              const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === marker.id);
+              if (eIdx >= 0) {
+                project.REST_CUSTOM[eIdx] = { ...project.REST_CUSTOM[eIdx], ...parsed, ID_REST_CUSTOM: marker.id };
+                found = true;
+                break;
+              }
+            }
+            if (!found) { throw new Error('Endpoint nao encontrado no cache.'); }
+          });
+        }
+      );
+
+      vscode.window.showInformationMessage('Alteracoes salvas via API (importar-json).');
+    } finally {
+      savingIndicator.dispose();
+    }
+  };
+
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(async (document) => {
+      if (document.uri.scheme !== ARIA_EDIT_SCHEME) {
+        return;
+      }
+
+      if (!editMap.has(document.uri.toString())) {
+        return;
+      }
+
+      try {
+        await saveEditedDocument(document);
+      } catch (error) {
+        vscode.window.showErrorMessage(`Falha ao salvar alteracoes: ${toErrorMessage(error)}`);
+      }
+    })
+  );
+
   const ensureEntraLogin = async (): Promise<boolean> => {
     const entraSettings = getEntraSettings();
     requireEntraLogin = entraSettings.requireLogin;
@@ -1525,12 +1776,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
       const project = await getProjectDetails(node.project.ID_PROJETO);
       const content = JSON.stringify(project, null, 2);
-      const filePath = await ensureEditFilePath(`project-${node.project.ID_PROJETO}.aria.json`);
-      await fs.promises.writeFile(filePath, content, 'utf8');
-      editMap.set(filePath, { type: 'projectJson', id: node.project.ID_PROJETO, projectId: node.project.ID_PROJETO });
-
-      const doc = await vscode.workspace.openTextDocument(filePath);
-      await vscode.window.showTextDocument(doc, { preview: false });
+      const doc = await openVirtualEditDocument(`project-${node.project.ID_PROJETO}.aria.json`, content, 'json');
+      editMap.set(doc.uri.toString(), { type: 'projectJson', id: node.project.ID_PROJETO, projectId: node.project.ID_PROJETO });
     }),
 
     // â”€â”€ Projeto: FormulÃ¡rio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1571,12 +1818,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
       const code = endpoint.TX_CODIGO ?? '';
       const codeExtension = resolveEndpointCodeExtension(endpoint);
-      const filePath = await ensureEditFilePath(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.${codeExtension}`);
-      await fs.promises.writeFile(filePath, code, 'utf8');
-      editMap.set(filePath, { type: 'endpointCode', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
-
-      const doc = await vscode.workspace.openTextDocument(filePath);
-      await vscode.window.showTextDocument(doc, { preview: false });
+      const language = codeExtension === 'py' ? 'python' : 'sql';
+      const doc = await openVirtualEditDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.${codeExtension}`, code, language);
+      editMap.set(doc.uri.toString(), { type: 'endpointCode', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
     }),
 
     // â”€â”€ Endpoint: JSON â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1591,12 +1835,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       const content = JSON.stringify(endpoint, null, 2);
-      const filePath = await ensureEditFilePath(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.json`);
-      await fs.promises.writeFile(filePath, content, 'utf8');
-      editMap.set(filePath, { type: 'endpointJson', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
-
-      const doc = await vscode.workspace.openTextDocument(filePath);
-      await vscode.window.showTextDocument(doc, { preview: false });
+      const doc = await openVirtualEditDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.json`, content, 'json');
+      editMap.set(doc.uri.toString(), { type: 'endpointJson', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
     }),
 
     // â”€â”€ Endpoint: FormulÃ¡rio â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1730,8 +1970,8 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      const filePath = editor.document.uri.fsPath;
-      const marker = editMap.get(filePath);
+      const docKey = editor.document.uri.toString();
+      const marker = editMap.get(docKey);
 
       if (!marker) {
         vscode.window.showWarningMessage('Este arquivo nao foi aberto pelo ARIA Editor.');
@@ -1739,68 +1979,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       await editor.document.save();
-
-      try {
-        const text = editor.document.getText();
-
-        const savingIndicator = vscode.window.setStatusBarMessage('$(sync~spin) ARIA: salvando via API...');
-        try {
-          await vscode.window.withProgress(
-            {
-              location: vscode.ProgressLocation.Notification,
-              title: 'ARIA: Salvando alteracoes via API...'
-            },
-            async () => {
-              await saveWithFreshDataset(`${marker.type}:${marker.id}`, marker.projectId, async (draft) => {
-                if (marker.type === 'endpointCode') {
-                  let found = false;
-                  for (const project of draft.registros) {
-                    const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === marker.id);
-                    if (eIdx >= 0) {
-                      project.REST_CUSTOM[eIdx] = { ...project.REST_CUSTOM[eIdx], TX_CODIGO: text };
-                      found = true;
-                      break;
-                    }
-                  }
-                  if (!found) { throw new Error('Endpoint nao encontrado no cache.'); }
-                  return;
-                }
-
-                if (marker.type === 'projectJson') {
-                  const parsed = JSON.parse(text) as Record<string, unknown>;
-                  const idx = draft.registros.findIndex((p) => p.ID_PROJETO === marker.id);
-                  if (idx < 0) { throw new Error('Projeto nao encontrado no cache.'); }
-                  draft.registros[idx] = {
-                    ...draft.registros[idx],
-                    ...parsed,
-                    ID_PROJETO: marker.id,
-                    REST_CUSTOM: (parsed.REST_CUSTOM as AriaEndpoint[]) || draft.registros[idx].REST_CUSTOM
-                  };
-                  return;
-                }
-
-                const parsed = JSON.parse(text) as Record<string, unknown>;
-                let found = false;
-                for (const project of draft.registros) {
-                  const eIdx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === marker.id);
-                  if (eIdx >= 0) {
-                    project.REST_CUSTOM[eIdx] = { ...project.REST_CUSTOM[eIdx], ...parsed, ID_REST_CUSTOM: marker.id };
-                    found = true;
-                    break;
-                  }
-                }
-                if (!found) { throw new Error('Endpoint nao encontrado no cache.'); }
-              });
-            }
-          );
-        } finally {
-          savingIndicator.dispose();
-        }
-
-        vscode.window.showInformationMessage('Alteracoes salvas via API (importar-json).');
-      } catch (error) {
-        vscode.window.showErrorMessage(`Falha ao salvar alteracoes: ${toErrorMessage(error)}`);
-      }
     }),
 
     vscode.commands.registerCommand('aria.validateActiveEditor', async () => {
@@ -1815,8 +1993,8 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      const filePath = editor.document.uri.fsPath;
-      const marker = editMap.get(filePath);
+      const docKey = editor.document.uri.toString();
+      const marker = editMap.get(docKey);
 
       if (!marker || marker.type !== 'endpointCode') {
         vscode.window.showWarningMessage('A validacao de codigo so esta disponivel para o editor de codigo do endpoint.');
@@ -3885,10 +4063,7 @@ function decodeJwtClaims(token: string): Record<string, unknown> | undefined {
 }
 
 async function ensureEditFilePath(fileName: string): Promise<string> {
-  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-  const editDir = workspaceFolder
-    ? path.join(workspaceFolder.uri.fsPath, '.aria-edit')
-    : path.join(os.tmpdir(), 'aria-edit');
+  const editDir = path.join(os.tmpdir(), 'aria-edit');
 
   await fs.promises.mkdir(editDir, { recursive: true });
   return path.join(editDir, fileName);
