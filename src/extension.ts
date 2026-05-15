@@ -351,6 +351,21 @@ class AriaApiClient {
     await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
   }
 
+  /**
+   * Importa um único endpoint usando o endpoint backend específico.
+   * Envia o JSON do endpoint no body e passa o ID do projeto em `p_id_projeto`.
+   * Retorna { status, mensagem } conforme a API.
+   */
+  public async importarJsonEndpoint(projectId: number, endpointJson: unknown): Promise<{ status?: string; mensagem?: string }> {
+    const query = { p_id_projeto: String(projectId) };
+    const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/importar-json-endpoint', query, endpointJson);
+    const root = asRecord(response) || {};
+    return {
+      status: typeof root.status === 'string' ? root.status : undefined,
+      mensagem: typeof root.mensagem === 'string' ? root.mensagem : undefined
+    };
+  }
+
   public async getEndpointMetadata(endpoint: AriaEndpoint): Promise<string | undefined> {
     const query = buildMetadataQuery(endpoint);
     const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/obtem-metadados', query);
@@ -395,13 +410,14 @@ class AriaApiClient {
     idBancoEsquema: unknown;
     txCodigo: string;
   }): Promise<ValidateCodeResponse> {
-    const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/valida-codigo', undefined, {
-      p_id_tipo_codigo: payload.idTipoCodigo,
-      p_id_banco_externo: payload.idBancoExterno,
-      p_sn_modo_compatibilidade: payload.snModoCompatibilidade,
-      p_id_banco_esquema: payload.idBancoEsquema,
-      p_tx_codigo: payload.txCodigo
-    });
+    const body: Record<string, unknown> = {};
+    if (payload.idTipoCodigo != null) body.p_id_tipo_codigo = payload.idTipoCodigo;
+    if (payload.idBancoExterno != null) body.p_id_banco_externo = payload.idBancoExterno;
+    if (payload.snModoCompatibilidade != null) body.p_sn_modo_compatibilidade = payload.snModoCompatibilidade;
+    if (payload.idBancoEsquema != null) body.p_id_banco_esquema = payload.idBancoEsquema;
+    if (payload.txCodigo != null) body.p_tx_codigo = payload.txCodigo;
+
+    const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/valida-codigo', undefined, body);
 
     return (asRecord(response) as ValidateCodeResponse | undefined) ?? {};
   }
@@ -1053,20 +1069,6 @@ function hasColumnAlias(token: string): boolean {
   return false;
 }
 
-function isAffirmativeConfirmationPrompt(prompt: string): boolean {
-  const normalized = toStringSafe(prompt)
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase();
-
-  if (!normalized) {
-    return false;
-  }
-
-  return /^(sim|s|ok|pode|pode sim|confirmo|confirmado|prosseguir|continue|segue|yes|isso|isso mesmo|e isso|e isso mesmo|certo|correto|exato|exatamente|concordo|pode ser|pode fazer|faz|manda|beleza|perfeito|bora|vai|pode criar|pode salvar|pode importar|manda ver|vai la|ta bom|ta certo|ta otimo)\b/.test(normalized);
-}
-
 function isEndpointProposalCompleteForConfirmation(text: string): boolean {
   const normalized = toStringSafe(text)
     .normalize('NFD')
@@ -1086,8 +1088,99 @@ function isEndpointProposalCompleteForConfirmation(text: string): boolean {
   const hasDescription = /(ds_rest_custom_curta|descricao curta|tx_comentarios|comentarios)/.test(normalized);
   const hasConfirmationAsk = /(confirma|confirmacao|deseja prosseguir|posso prosseguir|pode criar|pode prosseguir)/.test(normalized);
   const hasCode = hasEndpointCodeCandidate(text);
+  const hasJson = hasEndpointJsonCandidate(text);
 
-  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk && hasCode;
+  return hasName && hasPath && hasMethod && hasCodeType && hasBank && hasSchema && hasDescription && hasConfirmationAsk && hasCode && hasJson;
+}
+
+function hasEndpointProposalFieldSummary(text: string): boolean {
+  const normalized = toStringSafe(text)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (!normalized.trim()) {
+    return false;
+  }
+
+  // Detecta respostas com campos de endpoint (proposta parcial sem codigo ou JSON).
+  // Usa contagem: >= 3 sinais dispara, para nao exigir todos os campos de uma vez.
+  const signals: boolean[] = [
+    /(nome do endpoint|no_rest_custom)/.test(normalized),
+    /(caminho do endpoint|caminho:|tx_path|path:)/.test(normalized),
+    /(metodo http|id_metodo|metodo:)/.test(normalized),
+    /(tipo de codigo|id_tipo_codigo|linguagem:)/.test(normalized),
+    /(banco externo|id_banco_externo|banco de dados|banco:)/.test(normalized),
+    /(esquema:|id_banco_esquema|esquema do)/.test(normalized),
+    /(ds_rest_custom_curta|descricao curta|tx_comentarios|comentarios:|seguranca do endpoint|seguranca:)/.test(normalized),
+    /(confirme|confirmacao|confirmar)/.test(normalized),
+    /(prosseguir)/.test(normalized),
+  ];
+
+  return signals.filter(Boolean).length >= 3;
+}
+
+function hasEndpointJsonCandidate(text: string): boolean {
+  const source = toStringSafe(text);
+  if (!source.trim()) {
+    return false;
+  }
+
+  const hasCanonicalCoreKeys = (chunk: string): boolean => {
+    return (
+      /"?NO_REST_CUSTOM"?\s*:/.test(chunk) &&
+      /"?TX_PATH"?\s*:/.test(chunk) &&
+      /"?TX_CODIGO"?\s*:/.test(chunk)
+    );
+  };
+
+  const jsonFenceMatch = source.match(/```json\s*([\s\S]*?)```/i);
+  if (jsonFenceMatch?.[1] && hasCanonicalCoreKeys(jsonFenceMatch[1])) {
+    return true;
+  }
+
+  const genericFenceMatches = source.match(/```([\s\S]*?)```/g) ?? [];
+  for (const block of genericFenceMatches) {
+    const body = block.replace(/^```[a-zA-Z0-9_-]*\s*/i, '').replace(/```$/i, '').trim();
+    if (body.startsWith('{') && hasCanonicalCoreKeys(body)) {
+      return true;
+    }
+  }
+
+  return /\{[\s\S]{0,8000}(NO_REST_CUSTOM)[\s\S]{0,8000}(TX_PATH)[\s\S]{0,8000}(TX_CODIGO)[\s\S]{0,8000}\}/i.test(source);
+}
+
+function hasFriendlyEndpointJsonCandidate(text: string): boolean {
+  const source = toStringSafe(text);
+  if (!source.trim()) {
+    return false;
+  }
+
+  const normalized = source
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  const friendlySignals = [
+    /"nome"\s*:/.test(normalized),
+    /"caminho"\s*:/.test(normalized),
+    /"banco"\s*:/.test(normalized),
+    /"linguagem"\s*:/.test(normalized),
+    /"metodo"\s*:/.test(normalized),
+    /"query"\s*:/.test(normalized),
+  ];
+
+  const canonicalSignals = [
+    /"ID_REST_CUSTOM"\s*:/.test(source),
+    /"NO_REST_CUSTOM"\s*:/.test(source),
+    /"TX_PATH"\s*:/.test(source),
+    /"TX_CODIGO"\s*:/.test(source),
+    /"ID_METODO"\s*:/.test(source),
+    /"ID_TIPO_CODIGO"\s*:/.test(source),
+    /"ID_BANCO_EXTERNO"\s*:/.test(source),
+  ];
+
+  return friendlySignals.filter(Boolean).length >= 3 && canonicalSignals.filter(Boolean).length === 0;
 }
 
 function looksLikeEndpointProposalWithoutSql(text: string): boolean {
@@ -2767,6 +2860,7 @@ export function activate(context: vscode.ExtensionContext): void {
           output.appendLine('--- JSON gerado ---');
           output.appendLine(payloadStr);
           output.appendLine('--- fim do JSON ---');
+
           await client.saveDataset(payload);
           dataset = await client.getProjectEndpointTree();
           tree.refresh();
@@ -2835,6 +2929,10 @@ export function activate(context: vscode.ExtensionContext): void {
           // 2) { id_projeto, endpoint: { REST_CUSTOM: [{ NO_REST_CUSTOM, ... }] } } — modelo envelopou em REST_CUSTOM
           // 3) { id_projeto, NO_REST_CUSTOM, ... } — modelo colocou campos no nivel raiz
           let resolvedEndpoint: Record<string, unknown> | undefined;
+
+          output.appendLine(`--JSON só do endpoint --`);
+          output.appendLine(JSON.stringify(rawInput.endpoint, null, 2));
+          output.appendLine(`-- fim do JSON do endpoint --`);
 
           const endpointField = rawInput.endpoint;
           if (endpointField && typeof endpointField === 'object' && !Array.isArray(endpointField)) {
@@ -2913,6 +3011,67 @@ export function activate(context: vscode.ExtensionContext): void {
           } = resolvedEndpoint;
           const incomingEndpoint = endpointClean as unknown as AriaEndpoint;
           const incomingId = toNumber((incomingEndpoint as Record<string, unknown>).ID_REST_CUSTOM);
+
+          const incomingRecord = incomingEndpoint as unknown as Record<string, unknown>;
+          const hasFriendlyShape =
+            ('nome' in incomingRecord) ||
+            ('caminho' in incomingRecord) ||
+            ('banco' in incomingRecord) ||
+            ('linguagem' in incomingRecord) ||
+            ('metodo' in incomingRecord) ||
+            ('query' in incomingRecord);
+          const hasCanonicalShape =
+            ('NO_REST_CUSTOM' in incomingRecord) ||
+            ('TX_PATH' in incomingRecord) ||
+            ('TX_CODIGO' in incomingRecord) ||
+            ('ID_METODO' in incomingRecord) ||
+            ('ID_TIPO_CODIGO' in incomingRecord) ||
+            ('ID_BANCO_EXTERNO' in incomingRecord);
+
+          if (hasFriendlyShape && !hasCanonicalShape) {
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - formato amigavel/inventado detectado`);
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingRecord).join(', ')}`);
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Parametro invalido: endpoint em formato nao canonico. ' +
+                'Nao use chaves amigaveis como nome/caminho/banco/linguagem/metodo/query. ' +
+                'Use o objeto REST_CUSTOM com chaves reais, por exemplo: ' +
+                '{ ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ... }. ' +
+                'VARIABLE[] e opcional: inclua apenas se houver parametros.'
+              )
+            ]);
+          }
+
+          const requiredEndpointFields: Array<keyof AriaEndpoint> = [
+            'NO_REST_CUSTOM',
+            'TX_PATH',
+            'TX_CODIGO',
+            'ID_METODO',
+            'ID_TIPO_CODIGO',
+            'ID_BANCO_EXTERNO',
+          ];
+
+          const missingRequiredFields = requiredEndpointFields.filter((field) => {
+            const value = incomingRecord[String(field)];
+            if (typeof value === 'number') {
+              return !(value > 0);
+            }
+            return !toStringSafe(value).trim();
+          });
+
+          if (missingRequiredFields.length > 0) {
+            output.appendLine(
+              `[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - endpoint sem campos obrigatorios: ${missingRequiredFields.join(', ')}`
+            );
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingRecord).join(', ')}`);
+            return new vscode.LanguageModelToolResult([
+              new vscode.LanguageModelTextPart(
+                'Parametro invalido: endpoint (REST_CUSTOM) incompleto. Campos obrigatorios ausentes: ' +
+                `${missingRequiredFields.join(', ')}. ` +
+                'Envie endpoint/REST_CUSTOM com NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO e ID_BANCO_EXTERNO.'
+              )
+            ]);
+          }
 
           if (!incomingEndpoint.NO_REST_CUSTOM && !incomingEndpoint.TX_PATH) {
             output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - endpoint sem NO_REST_CUSTOM e TX_PATH`);
@@ -3076,10 +3235,26 @@ export function activate(context: vscode.ExtensionContext): void {
             `[${new Date().toISOString()}] aria_importar_json_endpoint: projeto=${idProjeto}, ` +
             `endpoint=${toStringSafe(ep.NO_REST_CUSTOM)}, ID_REST_CUSTOM=${incomingId}, ${payloadStr.length} bytes`
           );
+          
+
           output.appendLine('--- JSON gerado ---');
           output.appendLine(payloadStr);
           output.appendLine('--- fim do JSON ---');
-          await client.saveDataset(payload);
+
+          // Envia somente o JSON do endpoint tal como fornecido pelo modelo.
+          let endpointBody: unknown;
+          if (rawInput && Object.prototype.hasOwnProperty.call(rawInput, 'endpoint')) {
+            endpointBody = rawInput.endpoint;
+          } else {
+            const { id_projeto: _ignoreId, ...rest } = rawInput;
+            endpointBody = rest;
+          }
+
+          const importResult = await client.importarJsonEndpoint(idProjeto, endpointBody);
+          if (importResult?.status !== 'ok') {
+            throw new Error(importResult?.mensagem || 'API retornou status diferente de ok ao importar endpoint.');
+          }
+
           dataset = await client.getProjectEndpointTree();
           tree.refresh();
 
@@ -3246,6 +3421,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // Pre-carrega LOVs: tenta identificar o projeto a partir do prompt do usuario para carregar
     // os valores de referencia (metodos, bancos, esquemas, perfis) antes que o modelo responda.
     let lovsJson: string | undefined;
+    let lovsData: AriaLovs | undefined;
     let preloadedProjectId: number | undefined;
     try {
       const promptLower = request.prompt.toLowerCase();
@@ -3255,8 +3431,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (matchedProject) {
         preloadedProjectId = matchedProject.ID_PROJETO;
         response.progress(`Carregando LOVs (${matchedProject.NO_PROJETO})...`);
-        const lovs = await client.getLovs(preloadedProjectId);
-        lovsJson = JSON.stringify(lovs, null, 2);
+        lovsData = await client.getLovs(preloadedProjectId);
+        lovsJson = JSON.stringify(lovsData, null, 2);
       }
     } catch {
       // ignora falha no pre-carregamento de LOVs
@@ -3341,14 +3517,18 @@ export function activate(context: vscode.ExtensionContext): void {
       '   - Chame aria_importar_json_endpoint(id_projeto, endpoint) passando:',
       '     * id_projeto: o ID DO PROJETO (NUNCA o ID_BANCO_EXTERNO ou ID_BANCO_ESQUEMA)',
       '     * endpoint: o objeto JSON do endpoint (REST_CUSTOM) que foi proposto e confirmado',
+      '       endpoint e REST_CUSTOM sao o MESMO objeto.',
+      '       FORMATO CANONICO: use chaves reais do endpoint (ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ...).',
+      '       PROIBIDO JSON "amigavel" inventado com chaves como nome/caminho/banco/linguagem/metodo/query.',
+      '       VARIABLE[] e OPCIONAL: so inclua quando houver parametros de entrada (query string/path/body).',
       '   - O backend busca o projeto completo, preserva endpoints existentes e faz merge automatico.',
       '   - Voce NAO precisa chamar aria_obter_json_projeto — a tool faz isso internamente.',
       '   - Para endpoint novo: ID_REST_CUSTOM = 0. Para edicao: ID_REST_CUSTOM = ID existente.',
       '',
-      '   !! ATENCAO: a tool aria_importar_json_endpoint SO ESTA DISPONIVEL APOS O USUARIO CONFIRMAR. !!',
-      '   !! Se voce tentar chamar antes da confirmacao, a tool NAO estara acessivel. !!',
-      '   !! PRIMEIRO: mostre proposta completa (codigo + campos). DEPOIS: aguarde confirmacao. !!',
-      '   !! SO ENTAO: chame aria_importar_json_endpoint. !!',
+      '   !! ATENCAO: a tool aria_importar_json_endpoint so aparece quando existe uma proposta pendente. !!',
+      '   !! PRIMEIRO: mostre proposta completa (codigo + campos + JSON). DEPOIS: aguarde confirmacao do usuario. !!',
+      '   !! Quando o usuario confirmar (de qualquer forma), chame aria_importar_json_endpoint imediatamente. !!',
+      '   !! NAO peca nova confirmacao se o usuario ja confirmou. !!',
       '',
       '════════════════════════════════════════',
       '## COMO LER OS METADADOS DE COLUNAS',
@@ -3461,7 +3641,7 @@ export function activate(context: vscode.ExtensionContext): void {
       '- NUNCA emita mensagem intermediaria entre tool calls e a proposta final.',
       '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
       '- NUNCA chame aria_importar_json_endpoint sem confirmacao explicita do usuario.',
-      '- NUNCA pule a etapa de confirmacao — SEMPRE mostre a proposta completa e espere o usuario dizer sim.',
+      '- NUNCA pule a etapa de confirmacao — SEMPRE mostre a proposta completa e espere o usuario dizer sim (ou qualquer outra frase que remeta a confirmacao em qualquer idioma).',
       '- NUNCA faca questionario; deduza e pergunte apenas o indispensavel.',
       '- SEMPRE apresente codigo + campos do endpoint juntos na proposta. Nunca um sem o outro.',
       '- Se uma tool retornar erro, nao repita com os mesmos parametros; informe o usuario.',
@@ -3488,6 +3668,10 @@ export function activate(context: vscode.ExtensionContext): void {
     if (lovsJson) {
       messages.push(vscode.LanguageModelChatMessage.User(
         `CONTEXTO - LOVs (valores de referencia para campos ID_ e NO_):\n${lovsJson}`
+      ));
+
+      messages.push(vscode.LanguageModelChatMessage.User(
+        `CONEXOES DISPONIVEIS PARA ESCOLHA DO USUARIO:\n${buildLovsContextSummary(lovsData)}`
       ));
     }
 
@@ -3591,7 +3775,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Projeto sem conexoes de banco externo: instrui o modelo a perguntar ao usuario
         messages.push(vscode.LanguageModelChatMessage.User(
           `AVISO: O projeto identificado nao possui endpoints com banco externo definido.\n` +
-          `Pergunte ao usuario qual banco externo (ID_BANCO_EXTERNO) usar. ` +
+          `Pergunte ao usuario qual banco externo deseja usar e mostre as conexoes disponiveis antes de pedir a escolha. ` +
           `NAO pergunte sobre ID_BANCO_ESQUEMA — esse campo e opcional e sera inferido dos endpoints existentes ou deixado null. ` +
           `Apos obter o ID_BANCO_EXTERNO, chame aria_obter_metadados(p_id_banco_externo) sem ID_BANCO_ESQUEMA ` +
           `para descobrir os schemas Oracle disponiveis no banco.`
@@ -3620,21 +3804,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
     messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
 
-    const chatHistoryAssistantText = chatContext.history
+    const assistantResponses = chatContext.history
       .filter((turn): turn is vscode.ChatResponseTurn => turn instanceof vscode.ChatResponseTurn)
-      .flatMap((turn) => turn.response)
-      .filter((part): part is vscode.ChatResponseMarkdownPart => part instanceof vscode.ChatResponseMarkdownPart)
-      .map((part) => part.value.value)
-      .join('\n')
-      .toLowerCase();
+      .map((turn) => turn.response
+        .filter((part): part is vscode.ChatResponseMarkdownPart => part instanceof vscode.ChatResponseMarkdownPart)
+        .map((part) => part.value.value)
+        .join(''))
+      .filter((text) => text.trim().length > 0);
 
-    const lastAssistantResponseText = [...chatContext.history]
-      .reverse()
-      .find((turn): turn is vscode.ChatResponseTurn => turn instanceof vscode.ChatResponseTurn)
-      ?.response
-      .filter((part): part is vscode.ChatResponseMarkdownPart => part instanceof vscode.ChatResponseMarkdownPart)
-      .map((part) => part.value.value)
-      .join('') ?? '';
+    const recentAssistantContextText = assistantResponses.slice(-4).join('\n\n');
 
     const isEndpointMutationIntent = (() => {
       const prompt = toStringSafe(request.prompt).toLowerCase();
@@ -3642,25 +3820,25 @@ export function activate(context: vscode.ExtensionContext): void {
       const hasMutationVerb =
         /\b(criar|crie|novo|editar|edite|alterar|atualizar)\b/.test(prompt) ||
         /\b(criacao|edicao|alteracao|atualizacao)\b/.test(prompt);
-      const directMutationIntent = hasEndpoint && hasMutationVerb;
-
-      const isAffirmative = isAffirmativeConfirmationPrompt(prompt);
-      const hasEndpointProposalInContext = hasEndpointProposalContext(lastAssistantResponseText) || looksLikeEndpointProposalWithoutSql(lastAssistantResponseText);
-
-      return directMutationIntent || (isAffirmative && hasEndpointProposalInContext);
+      return hasEndpoint && hasMutationVerb;
     })();
 
-    const isAffirmativeReply = isAffirmativeConfirmationPrompt(request.prompt);
+    // Detecta proposta de endpoint pendente em uma janela recente do historico.
+    // Isso evita perder o estado quando o usuario responde apenas com confirmacoes curtas.
+    const hasEndpointProposalInContext = (() => {
+      if (!recentAssistantContextText.trim()) {
+        return false;
+      }
 
-    // hasReadyPendingEndpointProposal precisa ser calculado ANTES de decidir as tools
-    const hasReadyPendingEndpointProposal = isEndpointProposalReadyForImport(lastAssistantResponseText);
-    const hasEndpointProposalInContext = hasEndpointProposalContext(lastAssistantResponseText) || looksLikeEndpointProposalWithoutSql(lastAssistantResponseText);
+      return (
+        hasEndpointProposalContext(recentAssistantContextText) ||
+        looksLikeEndpointProposalWithoutSql(recentAssistantContextText) ||
+        hasEndpointProposalFieldSummary(recentAssistantContextText) ||
+        hasEndpointJsonCandidate(recentAssistantContextText) ||
+        hasFriendlyEndpointJsonCandidate(recentAssistantContextText)
+      );
+    })();
 
-    // A restricao de tools so acontece quando:
-    // 1) O usuario deu resposta afirmativa
-    // 2) A ULTIMA resposta do assistente tem contexto real de proposta de endpoint.
-    // Se o usuario disse "sim" fora desse contexto, mantem as tools normais.
-    const shouldRestrictToImport = isAffirmativeReply && hasEndpointProposalInContext;
     const userPromptHistory = [
       ...chatContext.history
         .filter((turn): turn is vscode.ChatRequestTurn => turn instanceof vscode.ChatRequestTurn)
@@ -3676,48 +3854,41 @@ export function activate(context: vscode.ExtensionContext): void {
     const hasFullEndpointMetadataContext = () =>
       metadataCalledInRequest && metadataTablesListedInRequest && metadataColumnsListedInRequest;
 
-    // Calcula tools antes do log para mostrar o count correto
-    // NORMAL: modelo NAO tem acesso a import — so pode propor e pedir confirmacao
+    // Tools disponiveis: import so aparece quando ha proposta pendente
     const TOOLS_NORMAL_FLOW = new Set<string>([
       'aria_obter_colunas_metadados',
       'aria_obter_json_projeto',
-      'aria_obter_metadados',         // fallback: se metadados nao estiverem em disco
-      ...(lovsJson ? [] : ['aria_obter_lovs']),  // fallback: se LOVs nao foram pre-carregadas
+      'aria_obter_metadados',
+      ...(lovsJson ? [] : ['aria_obter_lovs']),
+      ...(hasEndpointProposalInContext ? ['aria_importar_json_endpoint'] : []),
     ]);
 
-    const toolsForModel = shouldRestrictToImport
-      ? ariaTools
-      : ariaTools.filter((t) => TOOLS_NORMAL_FLOW.has(t.name));
+    const toolsForModel = ariaTools.filter((t) => TOOLS_NORMAL_FLOW.has(t.name));
 
     output.appendLine(
       `[${new Date().toISOString()}] @aria: "${request.prompt.slice(0, 120)}", ${messages.length} msgs, ${toolsForModel.length} tools expostas ao modelo`
     );
     output.appendLine(
-      `[${new Date().toISOString()}] @aria: isAffirmativeReply=${isAffirmativeReply}, hasReadyPendingEndpointProposal=${hasReadyPendingEndpointProposal}, ` +
-      `hasEndpointProposalInContext=${hasEndpointProposalInContext}, shouldRestrictToImport=${shouldRestrictToImport}, isEndpointMutationIntent=${isEndpointMutationIntent}`
+      `[${new Date().toISOString()}] @aria: hasEndpointProposalInContext=${hasEndpointProposalInContext}, isEndpointMutationIntent=${isEndpointMutationIntent}`
     );
 
-    if (shouldRestrictToImport) {
-      output.appendLine(`[${new Date().toISOString()}] @aria: AFFIRMATIVE FLOW — proposta completa detectada, tools restritas a: ${toolsForModel.map((t) => t.name).join(', ')}`);
-      // Metadados ja estavam carregados na requisicao anterior; marcar como presentes para os guardrails
-      metadataCalledInRequest = true;
-      metadataSchemasListedInRequest = true;
-      metadataTablesListedInRequest = true;
-      metadataColumnsListedInRequest = true;
+    if (hasEndpointProposalInContext) {
+      output.appendLine(`[${new Date().toISOString()}] @aria: proposta pendente detectada — aria_importar_json_endpoint disponivel`);
       messages.push(vscode.LanguageModelChatMessage.User(
-        'O usuario confirmou a proposta abaixo. Monte o JSON do endpoint baseado nela e chame a tool.\n\n' +
-        '--- PROPOSTA CONFIRMADA ---\n' +
-        lastAssistantResponseText + '\n' +
-        '--- FIM DA PROPOSTA ---\n\n' +
-        'INSTRUCOES:\n' +
-        '1. Extraia do texto acima: NO_REST_CUSTOM, TX_PATH, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, TX_CODIGO, DS_REST_CUSTOM_CURTA, TX_COMENTARIOS e demais campos.\n' +
-        '2. Monte SOMENTE o objeto do endpoint editado. NAO envie o projeto inteiro, NAO envie REST_CUSTOM com varios itens, NAO envie endpoints existentes.\n' +
-        '3. Chame aria_importar_json_endpoint({ id_projeto: <id>, endpoint: <json_do_endpoint> }).\n' +
-        '4. ID_REST_CUSTOM = 0 para endpoint novo, ou o ID existente para edicao.\n' +
-        '5. NAO chame nenhuma outra tool. NAO peca nova confirmacao.'
+        'ESTADO ATUAL: Proposta de endpoint pendente na ultima resposta do assistente.\n' +
+        'Se o usuario confirmar (de qualquer forma), chame IMEDIATAMENTE:\n' +
+        '  aria_importar_json_endpoint({ id_projeto: <ID_DO_PROJETO>, endpoint: { NO_REST_CUSTOM: "...", TX_PATH: "...", TX_CODIGO: "...", ID_METODO: N, ID_TIPO_CODIGO: N, ID_BANCO_EXTERNO: N, ID_BANCO_ESQUEMA: N, DS_REST_CUSTOM_CURTA: "...", TX_COMENTARIOS: "...", ... } })\n' +
+        'REGRAS ABSOLUTAS para o campo "endpoint":\n' +
+        '- DEVE ser o objeto plano do endpoint (o item REST_CUSTOM diretamente, sem nenhum wrapper).\n' +
+        '- endpoint e REST_CUSTOM sao o MESMO objeto.\n' +
+        '- Use formato CANONICO do endpoint: chaves reais como ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, NR_VERSAO, etc.\n' +
+        '- PROIBIDO JSON inventado com chaves amigaveis (nome, caminho, banco, linguagem, metodo, query).\n' +
+        '- VARIABLE[] e opcional: inclua somente se houver parametros; se nao houver, omita VARIABLE.\n' +
+        '- NUNCA use: { endpoint: { REST_CUSTOM: [...] } } — isso e ERRADO e vai falhar.\n' +
+        '- NUNCA inclua outros endpoints, o projeto inteiro, ou campos PROJETO/REST_CUSTOM_JSON_SCHEMA.\n' +
+        '- id_projeto e o ID_PROJETO do projeto, NUNCA o ID_BANCO_EXTERNO ou ID_BANCO_ESQUEMA.\n' +
+        '- Extraia todos os campos da proposta no historico acima.'
       ));
-    } else if (isEndpointMutationIntent && isAffirmativeReply && !hasReadyPendingEndpointProposal) {
-      output.appendLine(`[${new Date().toISOString()}] @aria: usuario confirmou mas proposta NAO esta completa — mantendo tools normais`);
     }
 
     for (let iteration = 0; iteration < 10 && !token.isCancellationRequested; iteration++) {
@@ -3753,32 +3924,34 @@ export function activate(context: vscode.ExtensionContext): void {
           continue;
         }
 
-        if (
-          shouldRestrictToImport &&
-          /(confirme|confirmacao|deseja prosseguir|posso prosseguir|quer que eu prossiga|prosseguir\?)/.test(bufferedTextLower)
-        ) {
-          output.appendLine(
-            `[${new Date().toISOString()}] Guardrail: resposta bloqueada por pedir confirmacao novamente apos usuario confirmar.`
-          );
+        {
+          const hasEndpointFields = hasEndpointProposalFieldSummary(bufferedText);
+          const hasEndpointJson = hasEndpointJsonCandidate(bufferedText);
+          const hasFriendlyEndpointJson = hasFriendlyEndpointJsonCandidate(bufferedText);
+          const hasEndpointCode = hasEndpointCodeCandidate(bufferedText);
+          const hasAnyEndpointSignal = hasEndpointFields || hasEndpointJson || hasFriendlyEndpointJson || hasEndpointCode;
 
-          messages.push(vscode.LanguageModelChatMessage.User(
-            'O usuario ja confirmou. Nao peca nova confirmacao; chame aria_importar_json_endpoint imediatamente com o JSON do endpoint.'
-          ));
-          continue;
-        }
+          if (hasAnyEndpointSignal && !(hasEndpointFields && hasEndpointJson && hasEndpointCode)) {
+            const missingPieces: string[] = [];
+            if (!hasEndpointCode) { missingPieces.push('query/codigo'); }
+            if (!hasEndpointFields) { missingPieces.push('campos do endpoint'); }
+            if (!hasEndpointJson) { missingPieces.push('JSON do endpoint'); }
 
-        // Se o usuario confirmou mas o modelo emitiu texto sem chamar a tool de import,
-        // forca-o a chamar aria_importar_json_endpoint.
-        if (shouldRestrictToImport) {
-          output.appendLine(
-            `[${new Date().toISOString()}] Guardrail: resposta bloqueada — usuario confirmou mas modelo nao chamou aria_importar_json_endpoint.`
-          );
+            const jsonShapeHint = hasFriendlyEndpointJson
+              ? ' Detectei JSON em formato amigavel/inventado. Use estritamente o formato canonico de REST_CUSTOM com chaves como ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO e ID_BANCO_EXTERNO.'
+              : '';
 
-          messages.push(vscode.LanguageModelChatMessage.User(
-            'O usuario ja confirmou a proposta. Voce DEVE chamar aria_importar_json_endpoint({ id_projeto: <id>, endpoint: <json_do_endpoint> }) AGORA. ' +
-            'Extraia os dados da PROPOSTA CONFIRMADA acima e chame a tool.'
-          ));
-          continue;
+            output.appendLine(
+              `[${new Date().toISOString()}] Guardrail: proposta parcial de endpoint bloqueada. Faltando: ${missingPieces.join(', ')}`
+            );
+
+            messages.push(vscode.LanguageModelChatMessage.User(
+              'Sua resposta precisa conter os 3 blocos juntos: query/codigo, campos do endpoint e JSON do endpoint. ' +
+              `Faltando agora: ${missingPieces.join(', ')}. ` +
+              `Reescreva em uma unica resposta completa, sem pular nenhum dos 3 blocos.${jsonShapeHint}`
+            ));
+            continue;
+          }
         }
 
         if (isEndpointMutationIntent && !metadataCalledInRequest) {
@@ -5396,7 +5569,7 @@ function buildRequestBodyForLog(endpointPath: string, body: unknown): unknown {
   return body;
 }
 
-function buildLovsContextSummary(lovs: AriaLovs | undefined, maxBanks = 8, maxSchemasPerBank = 8): string {
+function buildLovsContextSummary(lovs: AriaLovs | undefined): string {
   if (!lovs) {
     return 'LOVs: indisponíveis.';
   }
@@ -5405,9 +5578,9 @@ function buildLovsContextSummary(lovs: AriaLovs | undefined, maxBanks = 8, maxSc
   const tipoCodigo = (lovs.TIPO_CODIGO ?? []).map((item) => `${toStringSafe(item.NO_TIPO_CODIGO)}(${toNumber(item.ID_TIPO_CODIGO)})`).join(', ');
   const tipoHeader = (lovs.TIPO_HEADER ?? []).map((item) => `${toStringSafe(item.NO_TIPO_HEADER)}(${toNumber(item.ID_TIPO_HEADER)})`).join(', ');
 
-  const bancos = (lovs.BANCO_EXTERNO ?? []).slice(0, maxBanks).map((banco) => {
-    const schemas = (banco.BANCO_ESQUEMA ?? []).slice(0, maxSchemasPerBank).map((schema) => `${schema.NO_ESQUEMA}(${schema.ID_BANCO_ESQUEMA})`).join(', ');
-    return `- ${banco.CO_BANCO_EXTERNO}(${banco.ID_BANCO_EXTERNO})${schemas ? ` => ${schemas}` : ' => sem esquemas'}`;
+  const bancos = (lovs.BANCO_EXTERNO ?? []).map((banco) => {
+    const schemas = (banco.BANCO_ESQUEMA ?? []).map((schema) => `${schema.NO_ESQUEMA}(${schema.ID_BANCO_ESQUEMA})`).join(', ');
+    return `- ${banco.CO_BANCO_EXTERNO} (ID: ${banco.ID_BANCO_EXTERNO})${schemas ? `: ${schemas}` : ': Sem esquemas.'}`;
   });
 
   return [
