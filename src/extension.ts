@@ -1459,6 +1459,106 @@ function resolveCodeTypeSelection(
   };
 }
 
+
+function normalizeModelEndpointOutput(raw: Record<string, unknown>): Record<string, unknown> {
+    // Map friendly/invented keys to canonical ARIA endpoint keys
+    const keyMap: Record<string, string> = {
+        'nome': 'NO_REST_CUSTOM',
+        'name': 'NO_REST_CUSTOM',
+        'nome_endpoint': 'NO_REST_CUSTOM',
+        'caminho': 'TX_PATH',
+        'path': 'TX_PATH',
+        'banco': 'ID_BANCO_EXTERNO',
+        'banco_externo': 'ID_BANCO_EXTERNO',
+        'linguagem': 'ID_TIPO_CODIGO',
+        'tipo_codigo': 'ID_TIPO_CODIGO',
+        'metodo': 'ID_METODO',
+        'method': 'ID_METODO',
+        'query': 'TX_CODIGO',
+        'codigo': 'TX_CODIGO',
+        'code': 'TX_CODIGO',
+        'sql': 'TX_CODIGO',
+        'descricao': 'DS_REST_CUSTOM_CURTA',
+        'descricao_curta': 'DS_REST_CUSTOM_CURTA',
+        'comentarios': 'TX_COMENTARIOS',
+        'comments': 'TX_COMENTARIOS',
+        'esquema': 'ID_BANCO_ESQUEMA',
+        'schema': 'ID_BANCO_ESQUEMA',
+    };
+
+    // Unwrap envelope: if the model sent { REST_CUSTOM: [{...}] } instead of an endpoint
+    const restCustomArray = asArray(raw.REST_CUSTOM);
+    if (restCustomArray && restCustomArray.length > 0 && !raw.NO_REST_CUSTOM && !raw.TX_PATH) {
+        const firstEp = asRecord(restCustomArray[0]);
+        if (firstEp) {
+            raw = firstEp;
+        }
+    }
+
+    const normalized: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(raw)) {
+        const lowerKey = key.toLowerCase().trim();
+        const canonicalKey = keyMap[lowerKey] ?? key;
+        // Avoid overwriting a canonical key already set with a friendly-mapped one
+        if (canonicalKey !== key && normalized[canonicalKey] !== undefined) {
+            continue;
+        }
+        normalized[canonicalKey] = value;
+    }
+
+    // Ensure ID_REST_CUSTOM defaults to 0 for new endpoints
+    if (normalized.ID_REST_CUSTOM === undefined || normalized.ID_REST_CUSTOM === null) {
+        normalized.ID_REST_CUSTOM = 0;
+    }
+
+    // Fill default SN_ fields if absent
+    const snDefaults: Record<string, string> = {
+        SN_MODO_COMPATIBILIDADE: 'N',
+        SN_PAGINADO: 'N',
+        SN_CACHE: 'N',
+        SN_PUBLICADO: 'S',
+        SN_INCLUI_COUNT: 'N',
+        SN_HABILITA_META_API: 'N',
+        SN_NULOS_EXPLICITOS: 'N',
+        SN_IGNORA_CONFIGS_DEPLOY: 'N',
+        SN_APENAS_INTERNO: 'N',
+        SN_EXIGE_OTP: 'N',
+        SN_IDEMPOTENTE: 'N',
+    };
+    for (const [field, defaultValue] of Object.entries(snDefaults)) {
+        if (normalized[field] === undefined || normalized[field] === null) {
+            normalized[field] = defaultValue;
+        }
+    }
+
+    // Ensure SN_MODO_COMPATIBILIDADE is always 'N'
+    normalized.SN_MODO_COMPATIBILIDADE = 'N';
+
+    // Set other useful defaults
+    if (!normalized.IN_FORMATO_SAIDA) { normalized.IN_FORMATO_SAIDA = 'json'; }
+    if (!normalized.TX_MIME_TYPE) { normalized.TX_MIME_TYPE = 'application/json'; }
+    if (!normalized.IN_MODO_SEGURANCA) { normalized.IN_MODO_SEGURANCA = 1; }
+    if (normalized.NR_VERSAO === undefined || normalized.NR_VERSAO === null) { normalized.NR_VERSAO = 1; }
+
+    // Remove wrapper keys that should not be sent as part of the endpoint
+    delete normalized.REST_CUSTOM;
+    delete normalized.PROJETO;
+    delete normalized.REST_CUSTOM_JSON_SCHEMA;
+
+    // Initialize empty arrays for sub-collections if absent
+    const arrayDefaults = [
+        'REST_CUSTOM_PERFIL', 'REST_CUSTOM_RESPONSE', 'HEADER',
+        'REST_CUSTOM_IP', 'REST_CUSTOM_TIPO_OTP', 'REST_CUSTOM_ATRIBUTO_LOG'
+    ];
+    for (const field of arrayDefaults) {
+        if (!Array.isArray(normalized[field])) {
+            normalized[field] = [];
+        }
+    }
+
+    return normalized;
+}
+
 class ProjectNode extends vscode.TreeItem {
   public constructor(public readonly project: AriaProject) {
     super(`${project.NO_PROJETO} (${project.TX_PATH})`, vscode.TreeItemCollapsibleState.Collapsed);
@@ -2746,11 +2846,25 @@ export function activate(context: vscode.ExtensionContext): void {
                     ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
                     NO_VARIABLE: noVariable,
                     TX_REGEX_QS: txRegex,
-                    IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE ?? rawVar.IN_ORIGEM_VARIABLE,
+                    IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE,
                     TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
                   });
                 }
                 ep.VARIABLE = normalizedVars;
+
+                // Quando há VARIABLE, `IN_ORIGEM_VARIABLE` é obrigatório — validar aqui
+                const epVarsMissingOrigin = normalizedVars.filter(v => v == null || v.IN_ORIGEM_VARIABLE === undefined || v.IN_ORIGEM_VARIABLE === null);
+                if (epVarsMissingOrigin.length > 0) {
+                  output.appendLine(
+                    `[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - VARIABLE sem IN_ORIGEM_VARIABLE definido no payload`
+                  );
+                  output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: project keys = ${Object.keys(project).join(', ')}`);
+                  return new vscode.LanguageModelToolResult([
+                    new vscode.LanguageModelTextPart(
+                      `ERRO: Existem entradas em VARIABLE no payload sem IN_ORIGEM_VARIABLE definido. Informe IN_ORIGEM_VARIABLE para cada variável.`
+                    )
+                  ]);
+                }
               }
             }
 
@@ -3061,15 +3175,29 @@ export function activate(context: vscode.ExtensionContext): void {
                 continue;
               }
               const txRegex = toStringSafe(rawVar.TX_REGEX_QS).trim() || noVariable;
-              normalizedVars.push({
-                ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
-                NO_VARIABLE: noVariable,
-                TX_REGEX_QS: txRegex,
-                IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE,
-                TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
-              });
+                normalizedVars.push({
+                    ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
+                    NO_VARIABLE: noVariable,
+                    TX_REGEX_QS: txRegex,
+                    IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE,
+                    TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
+                  });
             }
             (incomingEndpoint as any).VARIABLE = normalizedVars;
+
+            // Quando há VARIABLE, `IN_ORIGEM_VARIABLE` é obrigatório — validar aqui
+            const varsMissingOrigin = normalizedVars.filter(v => v == null || v.IN_ORIGEM_VARIABLE === undefined || v.IN_ORIGEM_VARIABLE === null);
+            if (varsMissingOrigin.length > 0) {
+              output.appendLine(
+                `[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - VARIABLE sem IN_ORIGEM_VARIABLE definido`
+              );
+              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingEndpoint).join(', ')}`);
+              return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(
+                  `ERRO: Existem entradas em VARIABLE sem IN_ORIGEM_VARIABLE definido. Informe IN_ORIGEM_VARIABLE para cada variável.`
+                )
+              ]);
+            }
           }
           if (isSqlEndpointCodeType(incomingEndpoint) && typeof incomingEndpoint.TX_CODIGO === 'string' && incomingEndpoint.TX_CODIGO.trim()) {
             incomingEndpoint.TX_CODIGO = incomingEndpoint.TX_CODIGO.trimEnd().replace(/;+$/, '');
@@ -3224,96 +3352,68 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── Chat Participant @aria ──────────────────────────────────────────────────
 
-  const REST_CUSTOM_SCHEMA_STR = `{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "REST_CUSTOM",
-  "type": "object",
-  "properties": {
-    "ID_REST_CUSTOM":          { "type": ["number", "null"] },
-    "NO_REST_CUSTOM":          { "type": ["string", "null"] },
-    "TX_PATH":                 { "type": ["string", "null"] },
-    "ID_TIPO_CODIGO":          { "type": ["number", "null"] },
-    "NO_TIPO_CODIGO":          { "type": ["string", "null"] },
-    "TX_CODIGO":               { "type": ["string", "null"] },
-    "TX_COMENTARIOS":          { "type": ["string", "null"] },
-    "ID_PROJETO":              { "type": ["number", "null"] },
-    "NR_VERSAO":               { "type": ["number", "null"] },
-    "ID_METODO":               { "type": ["number", "null"] },
-    "NO_METODO":               { "type": ["string", "null"] },
-    "TX_MIME_TYPE":            { "type": ["string", "null"] },
-    "ID_TIPO_HEADER":          { "type": ["number", "null"] },
-    "NO_TIPO_HEADER":          { "type": ["string", "null"] },
-    "NR_PAGE_SIZE":            { "type": ["number", "null"] },
-    "SN_PAGINADO":             { "type": ["string", "null"] },
-    "IN_MODO_SEGURANCA":       { "type": ["string", "null"] },
-    "ID_BANCO_EXTERNO":        { "type": ["number", "null"] },
-    "CO_BANCO_EXTERNO":        { "type": ["string", "null"] },
-    "IN_TIPO_TRANSFORMACAO":   { "type": ["string", "null"] },
-    "SN_MODO_COMPATIBILIDADE": { "type": ["string", "null"] },
-    "SN_CACHE":                { "type": ["string", "null"] },
-    "NR_TEMPO_CACHE":          { "type": ["number", "null"] },
-    "IN_TEMPO_CACHE":          { "type": ["string", "null"] },
-    "DT_EXP_CACHE":            { "type": ["string", "null"] },
-    "ID_BANCO_ESQUEMA":        { "type": ["number", "null"] },
-    "NO_ESQUEMA":              { "type": ["string", "null"] },
-    "SN_PUBLICADO":            { "type": ["string", "null"] },
-    "TX_URL_PROXY":            { "type": ["string", "null"] },
-    "TOKEN_PROXY":             { "type": ["string", "null"] },
-    "SN_INCLUI_COUNT":         { "type": ["string", "null"] },
-    "IN_FORMATO_SAIDA":        { "type": ["string", "null"] },
-    "TX_SEPARADOR_CSV":        { "type": ["string", "null"] },
-    "SN_HABILITA_META_API":    { "type": ["string", "null"] },
-    "TX_SECRET_META_API":      { "type": ["string", "null"] },
-    "SN_NULOS_EXPLICITOS":     { "type": ["string", "null"] },
-    "DS_REST_CUSTOM_CURTA":    { "type": ["string", "null"] },
-    "TX_PATH_AUX":             { "type": ["string", "null"] },
-    "ID_OPERATION_OPENAPI":    { "type": ["string", "null"] },
-    "SN_IGNORA_CONFIGS_DEPLOY":{ "type": ["string", "null"] },
-    "SN_APENAS_INTERNO":       { "type": ["string", "null"] },
-    "SN_EXIGE_OTP":            { "type": ["string", "null"] },
-    "SN_IDEMPOTENTE":          { "type": ["string", "null"] },
-    "IN_JANELA_TEMPO_CACHE":   { "type": ["string", "null"] },
-    "PROJETO": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "TX_PATH":    { "type": ["string", "null"] },
-          "CO_SISTEMA": { "type": ["string", "null"] }
-        }
-      }
-    },
-    "REST_CUSTOM_PERFIL": { "type": "array" },
-    "REST_CUSTOM_RESPONSE": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "ID_REST_CUSTOM_RESPONSE": { "type": ["number", "null"] },
-          "NR_CODIGO":               { "type": ["number", "null"] },
-          "DS_RESPONSE":             { "type": ["string", "null"] },
-          "TX_EXEMPLO_RESPOSTA":     { "type": ["string", "null"] }
-        }
-      }
-    },
-    "VARIABLE": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "ID_VARIABLE":          { "type": ["number", "null"] },
-          "NO_VARIABLE":          { "type": ["string", "null"] },
-          "IN_ORIGEM_VARIABLE":   { "type": ["string", "null"] },
-          "TX_DESCRICAO":         { "type": ["string", "null"] },
-          "VARIABLE_VALOR_POSSIVEL": { "type": "array" }
-        }
-      }
-    },
-    "HEADER":                  { "type": "array" },
-    "REST_CUSTOM_IP":          { "type": "array" },
-    "REST_CUSTOM_TIPO_OTP":    { "type": "array" },
-    "REST_CUSTOM_ATRIBUTO_LOG":{ "type": "array" }
-  }
+  const REST_CUSTOM_ENDPOINT_EXAMPLE = `{
+  "ID_REST_CUSTOM": 0,
+  "NO_REST_CUSTOM": "Consultar Projetos do SISGP",
+  "TX_PATH": "sisgp/projetos",
+  "ID_TIPO_CODIGO": 1,
+  "NO_TIPO_CODIGO": "SQL",
+  "TX_CODIGO": "SELECT \n  p.ID_PROJETO AS \\"idProjeto\\",\n  p.NO_PROJETO AS \\"nomeProjeto\\",\n  p.DS_PROJETO AS \\"descricaoProjeto\\"\nFROM \n  COSIS_SISGP.PROJETO p\nWHERE \n  (:idProjeto IS NULL OR p.ID_PROJETO = :idProjeto)",
+  "TX_COMENTARIOS": null,
+  "ID_PROJETO": 201,
+  "NR_VERSAO": 1,
+  "ID_METODO": 1,
+  "NO_METODO": "GET",
+  "TX_MIME_TYPE": "application/json",
+  "ID_TIPO_HEADER": 1,
+  "NO_TIPO_HEADER": "Automático",
+  "NR_PAGE_SIZE": 10,
+  "SN_PAGINADO": "N",
+  "IN_MODO_SEGURANCA": 1,
+  "ID_BANCO_EXTERNO": 1,
+  "CO_BANCO_EXTERNO": "stnapexdev",
+  "IN_TIPO_TRANSFORMACAO": null,
+  "SN_MODO_COMPATIBILIDADE": "N",
+  "SN_CACHE": "S",
+  "NR_TEMPO_CACHE": 15,
+  "IN_TEMPO_CACHE": "M",
+  "DT_EXP_CACHE": null,
+  "ID_BANCO_ESQUEMA": null,
+  "NO_ESQUEMA": null,
+  "SN_PUBLICADO": "S",
+  "TX_URL_PROXY": null,
+  "TOKEN_PROXY": null,
+  "SN_INCLUI_COUNT": "N",
+  "IN_FORMATO_SAIDA": "json",
+  "TX_SEPARADOR_CSV": ",",
+  "SN_HABILITA_META_API": "N",
+  "TX_SECRET_META_API": null,
+  "SN_NULOS_EXPLICITOS": "N",
+  "DS_REST_CUSTOM_CURTA": "Retorna projetos do SISGP com filtro opcional",
+  "TX_PATH_AUX": null,
+  "ID_OPERATION_OPENAPI": null,
+  "SN_IGNORA_CONFIGS_DEPLOY": "N",
+  "SN_APENAS_INTERNO": "N",
+  "SN_EXIGE_OTP": "N",
+  "SN_IDEMPOTENTE": "N",
+  "IN_JANELA_TEMPO_CACHE": null,
+  "PROJETO": [{ "TX_PATH": "micro", "CO_SISTEMA": "2890" }],
+  "REST_CUSTOM_PERFIL": [],
+  "REST_CUSTOM_RESPONSE": [],
+  "VARIABLE": [
+    {
+      "ID_VARIABLE": 10000,
+      "TX_REGEX_QS": "idProjeto",
+      "NO_VARIABLE": "idProjeto",
+      "IN_ORIGEM_VARIABLE": 2,
+      "TX_DESCRICAO": "Parametro opcional para filtrar projetos pelo ID",
+      "VARIABLE_VALOR_POSSIVEL": []
+    }
+  ],
+  "HEADER": [],
+  "REST_CUSTOM_IP": [],
+  "REST_CUSTOM_TIPO_OTP": [],
+  "REST_CUSTOM_ATRIBUTO_LOG": []
 }`;
 
   const ariaParticipant = vscode.chat.createChatParticipant('aria.assistant', async (request, chatContext, response, token) => {
@@ -3394,226 +3494,82 @@ export function activate(context: vscode.ExtensionContext): void {
     const ariaTools = vscode.lm.tools.filter((t) => t.name.startsWith('aria_'));
 
     const systemPrompt = [
-      'Voce e um assistente especialista na plataforma ARIA (endpoints REST sobre bancos Oracle).',
-      '',
-      '!! ATENCAO: TODAS AS REGRAS DESTE PROMPT SAO ABSOLUTAS E NAO NEGOCIAVEIS. !!',
-      '',
-      '════════════════════════════════════════',
-      '## CONTEXTO JA CARREGADO — NAO use tools para buscar esses dados',
-      '════════════════════════════════════════',
-      '',
-      '- PROJETOS E ENDPOINTS: mensagem "CONTEXTO - Projetos e endpoints disponiveis".',
-      '- LOVs (valores validos para campos ID_ e NO_): mensagem "CONTEXTO - LOVs" (se presente).',
-      '- CAMPOS OBRIGATORIOS do formulario de endpoint: mensagem "CONTEXTO - Campos obrigatorios" (se presente).',
-      '- TABELAS DISPONIVEIS: mensagem "TABELAS DISPONIVEIS NOS METADADOS" (se presente).',
-      '',
-      'NAO chame aria_obter_projetos nem aria_obter_tabelas_metadados — dados ja estao no contexto.',
-      'Se LOVs estiverem no contexto, NAO chame aria_obter_lovs.',
-      'Se campos obrigatorios estiverem no contexto, NAO chame aria_obter_itens_apex.',
-      '',
-      '════════════════════════════════════════',
-      '## FLUXO OBRIGATORIO — execute nesta ordem:',
-      '════════════════════════════════════════',
-      '',
-      '1. IDENTIFICAR PROJETO',
-      '   - Use a mensagem de contexto de projetos.',
-      '   - Se ambiguo, faca 1 pergunta objetiva.',
-      '',
-      '2. IDENTIFICAR BANCO EXTERNO',
-      '   - ID_BANCO_EXTERNO: deduzido das LOVs (lista BANCO_EXTERNO) e dos endpoints existentes no contexto de projetos.',
-      '   - Se outro endpoint do mesmo projeto ja usa um banco, use o mesmo ID_BANCO_EXTERNO.',
-      '   - Se ainda incerto, faca 1 pergunta objetiva ao usuario: qual banco externo?',
-      '',
-      '   !! ID_BANCO_ESQUEMA NAO E UM SCHEMA ORACLE — SAO CONCEITOS DIFERENTES !!',
-      '   - ID_BANCO_ESQUEMA = filtro de conexao (opcional). Quando null/0, usa credencial padrao que acessa VARIOS schemas Oracle.',
-      '   - Schema Oracle (ex: STN, COSIS_MICRO) = nome que aparece no metadata como "# STN" ou "## STN.TABELA".',
-      '   - NUNCA deduza ID_BANCO_ESQUEMA a partir de um nome de schema Oracle.',
-      '     Exemplo ERRADO: usuario diz "STN" -> modelo preenche ID_BANCO_ESQUEMA=22. ISSO E ERRADO.',
-      '   - Copie ID_BANCO_ESQUEMA de outro endpoint existente do mesmo projeto. Se nao houver, deixe null/0.',
-      '   - Para descobrir quais schemas Oracle o banco expoe, chame aria_obter_metadados(p_id_banco_externo) sem ID_BANCO_ESQUEMA.',
-      '',
-      '3. IDENTIFICAR TABELAS NECESSARIAS',
-      '   - Use a lista "TABELAS DISPONIVEIS NOS METADADOS" do contexto.',
-      '   - Filtre pelo assunto do pedido (ex: "usuarios" -> USUARIO, USUARIOS, USER).',
-      '   - NUNCA use o nome do projeto como criterio (ex: nao escolha MICROSERVICO para "usuarios" porque o projeto se chama MICRO).',
-      '   - Se nao encontrar tabela compativel, informe ao usuario e pergunte de qual banco/schema carregar.',
-      '   - Neste caso, chame aria_obter_metadados(p_id_banco_externo [, p_id_banco_esquema]) para obter a lista completa.',
-      '',
-      '4. OBTER COLUNAS: aria_obter_colunas_metadados(p_id_banco_externo, tabela [, schema, p_id_banco_esquema])',
-      '   - Chame para CADA tabela que sera usada no codigo.',
-      '   - NAO escreva nenhum codigo antes de concluir esta etapa para todas as tabelas.',
-      '',
-      '5. ESCREVER O CODIGO (SQL / PL/SQL / Python)',
-      '   - Veja as secoes de regras abaixo.',
-      '   - Execute tools silenciosamente. NAO emita mensagem intermediaria entre tool calls.',
-      '',
-      '6. APRESENTAR PROPOSTA — GUARDRAIL OBRIGATORIO:',
-      '   !! PROIBIDO apresentar so o codigo sem os campos do endpoint. !!',
-      '   !! PROIBIDO apresentar so os campos do endpoint sem o codigo. !!',
-      '   SEMPRE mostre juntos em uma unica resposta:',
-      '     a) O codigo completo (TX_CODIGO)',
-      '     b) TODOS os campos do endpoint: NO_REST_CUSTOM, TX_PATH, ID_METODO, NO_METODO, ID_TIPO_CODIGO,',
-      '        ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, e demais campos relevantes.',
-      '     c) O objeto JSON do endpoint (REST_CUSTOM) formatado e pronto para envio.',
-      '   AO FINAL da resposta da proposta, pergunte explicitamente ao usuario se ele confirma a criacao do endpoint.',
-      '   Use esta frase exatamente ao final: "Confirma a criacao do endpoint com o codigo, campos e JSON acima? (sim/não)"',
-      '   Aguarde a resposta do usuario. NAO chame aria_importar_json_endpoint sem confirmacao explicita.',
-      '',
-      '   ANTES de gerar o JSON do endpoint (REST_CUSTOM):',
-      '     - Preencha TODOS os campos obrigatorios listados em "CONTEXTO - Campos obrigatorios".',
-      '     - Para campos do tipo ID_/NO_ use os valores das LOVs carregadas no contexto quando existirem.',
-      '     - Se metadados foram carregados (arquivos metadata-... no contexto), e a proposta usa essas tabelas,',
-      '       DEFINA `ID_BANCO_EXTERNO` exatamente como o valor usado para buscar os metadados. NAO omita `ID_BANCO_EXTERNO`.',
-      '     - Inclua `CO_BANCO_EXTERNO` correspondente e `ID_BANCO_ESQUEMA` quando puder ser inferido. Se nao puder inferir ID_BANCO_ESQUEMA, use 0 explicitamente.',
-      '     - Se algum campo obrigatorio nao puder ser inferido, PERCURTE a pergunta objetiva ao usuario solicitando apenas esse valor.',
-      '',
-      '7. APOS CONFIRMACAO DO USUARIO:',
-      '   - Chame aria_importar_json_endpoint(id_projeto, endpoint) passando:',
-      '     * id_projeto: o ID DO PROJETO (NUNCA o ID_BANCO_EXTERNO ou ID_BANCO_ESQUEMA)',
-      '     * endpoint: o objeto JSON do endpoint (REST_CUSTOM) que foi proposto e confirmado',
-      '       endpoint e REST_CUSTOM sao o MESMO objeto.',
-      '       FORMATO CANONICO: use chaves reais do endpoint (ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ...).',
-      '       PROIBIDO JSON "amigavel" inventado com chaves como nome/caminho/banco/linguagem/metodo/query.',
-      '       VARIABLE[] e OPCIONAL: so inclua quando houver parametros de entrada (query string/path/body).',
-      '   - O backend busca o projeto completo, preserva endpoints existentes e faz merge automatico.',
-      '   - Voce NAO precisa chamar aria_obter_json_projeto — a tool faz isso internamente.',
-      '   - Para endpoint novo: ID_REST_CUSTOM = 0. Para edicao: ID_REST_CUSTOM = ID existente.',
-      '',
-      '   !! ATENCAO: a tool aria_importar_json_endpoint so aparece quando existe uma proposta pendente. !!',
-      '   !! PRIMEIRO: mostre proposta completa (codigo + campos + JSON). DEPOIS: aguarde confirmacao do usuario. !!',
-      '   !! Quando o usuario confirmar (de qualquer forma), chame aria_importar_json_endpoint imediatamente. !!',
-      '   !! NAO peca nova confirmacao se o usuario ja confirmou. !!',
-      '',
-      '════════════════════════════════════════',
-      '## COMO LER OS METADADOS DE COLUNAS',
-      '════════════════════════════════════════',
-      '',
-      'O resultado de aria_obter_colunas_metadados e Markdown estruturado:',
-      '',
-      '  # NOME_SCHEMA',
-      '      Inicia um bloco de schema.',
-      '',
-      '  ## SCHEMA.NOME_TABELA  [comentario opcional]',
-      '      Define uma tabela.',
-      '',
-      '  - NOME_COLUNA TIPO_DADO  [comentario opcional]',
-      '      Define uma coluna da tabela atual. NOME_COLUNA e o nome exato a usar no SQL.',
-      '',
-      '  - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
-      '      Chave estrangeira da tabela atual.',
-      '',
-      'REGRAS DE INTERPRETACAO:',
-      '  - Hierarquia: schema (#) > tabela (##) > colunas/FKs (-).',
-      '  - Uma coluna pertence SOMENTE a tabela do ultimo ## lido antes dela.',
-      '  - NUNCA atribua coluna a tabela diferente da que ela esta listada.',
-      '  - Se o contexto trouxer SCHEMA SUGERIDO, use-o como preferencia quando o schema nao for especificado.',
-      '',
-      '════════════════════════════════════════',
-      '## SELECAO DE TABELA E ESCRITA DO CODIGO',
-      '════════════════════════════════════════',
-      '',
-      'SELECAO DE TABELA — ordem de prioridade:',
-      '  1. Match exato do nome da tabela com o assunto pedido (ex: "metodos" -> METODO ou METODOS).',
-      '  2. Se houver SCHEMA SUGERIDO, priorize tabelas nesse schema.',
-      '  3. Se mais de uma candidata plausivel, PARE e pergunte ao usuario.',
-      '  4. NUNCA escolha tabela por aproximacao semantica fraca sem confirmar.',
-      '',
-      'SELECAO DE COLUNAS — regras absolutas:',
-      '  - Use SOMENTE colunas listadas no bloco ## da tabela escolhida.',
-      '  - Verifique o nome exato antes de usar.',
-      '  - NUNCA invente coluna.',
-      '  - Se faltar coluna para o pedido, diga ao usuario.',
-      '',
-      'JOINS — regra unica:',
-      '  - JOIN so e permitido quando houver FK explicita no arquivo.',
-      '  - Formato: - FK: COLUNA_LOCAL -> SCHEMA.TABELA_DESTINO(COLUNA_DESTINO)',
-      '  - Sem FK declarada, NAO faca JOIN.',
-      '',
-      'ESCRITA DO SQL — REGRAS INVIOLAVEIS:',
-      '  !! PROIBIDO: SELECT * ou SELECT tabela.* em qualquer situacao. !!',
-      '  - Liste TODAS as colunas explicitamente com alias camelCase ENTRE ASPAS DUPLAS.',
-      '    Exemplo: m.ID_MICRO AS "idMicro", m.NO_MICRO AS "nomeMicro"',
-      '  - Alias obrigatorio em TODAS as colunas. Nunca deixe coluna sem alias.',
-      '  - NUNCA use alias igual ao nome bruto da coluna (ex: AS ORIGEM). Use camelCase entre aspas duplas.',
-      '  - NUNCA coloque aspas duplas em tabelas, schemas ou colunas.',
-      '  - NUNCA escreva `"p"."ID_PROJETO"` nem `"SCHEMA"."TABELA"`. Use `p.ID_PROJETO AS "idProjeto"`.',
-      '  - Use SCHEMA.TABELA nas clausulas FROM/JOIN.',
-      '  - NUNCA termine SQL puro com ponto e virgula (;).',
-      '  - FORMATAÇÃO OBRIGATÓRIA: formate consultas SQL com indentação consistente, palavras-chave em MAIÚSCULAS,',
-      '    cada coluna em uma linha separada com seu alias entre aspas duplas, e quebras de linha legíveis para SELECT/FROM/JOIN/WHERE/GROUP BY/ORDER BY.',
-      '    Exemplo de estilo aceitável:',
-      '      SELECT t.ID_COL AS "idCol", t.NO_COL AS "nomeCol"',
-      '      FROM SCHEMA.TABELA t',
-      '      WHERE t.FLAG = 1',
-      '    Sempre preserve a legibilidade; o JSON do endpoint deve conter o TX_CODIGO já formatado assim.',
-      '',
-      '════════════════════════════════════════',
-      '## PL/SQL — REGRAS OBRIGATORIAS (tipo PLSQL)',
-      '════════════════════════════════════════',
-      '',
-      'ITERACAO:',
-      '  !! PROIBIDO cursor explicito (CURSOR c IS ...; OPEN c; FETCH c; CLOSE c). !!',
-      '  SEMPRE use: FOR rec IN (SELECT col1, col2 FROM schema.tabela WHERE ...) LOOP ... END LOOP;',
-      '',
-      'JSON:',
-      '  - Use OBRIGATORIAMENTE funcoes nativas Oracle: JSON_OBJECT, JSON_ARRAY, JSON_ARRAYAGG.',
-      '  - NUNCA construa JSON por concatenacao de strings.',
-      '',
-      'VARIAVEIS IMPLICITAS — NAO DECLARE, USE DIRETAMENTE:',
-      '  - `aria_output` (SEM dois pontos): aria_output := valor;',
-      "    Correto: aria_output := JSON_OBJECT(...); | ERRADO: :aria_output := ...",
-      '  - `:request_body`, `:aria_perfis_usuario`, `:aria_id_usuario`, `:aria_login_usuario`, `:aria_email_usuario` (COM dois pontos).',
-      "    Uso de perfis: 'Administrador' member of apex_string.split(:aria_perfis_usuario, ':')",
-      '',
-      '════════════════════════════════════════',
-      '## PARA CRIAR ENDPOINT',
-      '════════════════════════════════════════',
-      '',
-      '- Deduza o maximo do contexto antes de perguntar.',
-      '- Defaults: NO_REST_CUSTOM derivado do assunto, TX_PATH em slug lowercase, ID_METODO=GET, ID_TIPO_CODIGO=SQL.',
-      '- Se precisar perguntar, faca 1 pergunta objetiva por vez.',
-      '',
-      'JSON do endpoint:',
-      '  - ID_REST_CUSTOM = 0 para endpoint novo.',
-      '  - Envie SOMENTE o objeto do endpoint (REST_CUSTOM), NAO o projeto inteiro.',
-      '  - Chame: aria_importar_json_endpoint({ id_projeto: <id>, endpoint: { ID_REST_CUSTOM: 0, NO_REST_CUSTOM: ..., TX_CODIGO: ..., ... } })',
-      '  - O backend busca o projeto, preserva endpoints existentes e faz merge automatico.',
-      '  - NAO chame aria_obter_json_projeto para criar — a tool faz isso internamente.',
-      '',
-      '════════════════════════════════════════',
-      '## PARA EDITAR ENDPOINT',
-      '════════════════════════════════════════',
-      '',
-      '- Se houver mudanca de SQL, chame aria_obter_colunas_metadados antes da proposta.',
-      '- Mostre codigo + todos os campos do endpoint, peca confirmacao 1 vez.',
-      '- Apos confirmacao, chame aria_importar_json_endpoint({ id_projeto, endpoint }) com o ID_REST_CUSTOM do endpoint existente.',
-      '- O backend busca o projeto e faz merge automatico.',
-      '',
-      '════════════════════════════════════════',
-      '## REGRAS ABSOLUTAS',
-      '════════════════════════════════════════',
-      '',
-      '- NUNCA invente tabela, coluna, schema ou FK.',
-      '- NUNCA faca JOIN sem FK declarada.',
-      '- NUNCA use SELECT * ou tabela.*.',
-      '- NUNCA deixe coluna sem alias no SELECT.',
-      '- NUNCA use alias igual ao nome bruto da coluna.',
-      '- NUNCA termine SQL puro com ;.',
-      '- NUNCA emita mensagem intermediaria entre tool calls e a proposta final.',
-      '- NUNCA chute ID_BANCO_ESQUEMA sem evidencia.',
-      '- NUNCA chame aria_importar_json_endpoint sem confirmacao explicita do usuario.',
-      '- NUNCA pule a etapa de confirmacao — SEMPRE mostre a proposta completa e espere o usuario dizer sim (ou qualquer outra frase que remeta a confirmacao em qualquer idioma).',
-      '- NUNCA faca questionario; deduza e pergunte apenas o indispensavel.',
-      '- SEMPRE apresente codigo + campos do endpoint juntos na proposta. Nunca um sem o outro.',
-      '- Se uma tool retornar erro, nao repita com os mesmos parametros; informe o usuario.',
-      '- Documente: DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, VARIABLE[].TX_DESCRICAO.',
-      '- Em PL/SQL: FOR rec IN (...) LOOP obrigatorio. Cursor explicito proibido.',
-      '- Em PL/SQL: aria_output sem dois pontos. Demais variaveis ARIA com dois pontos.',
-      '- Em PL/SQL: JSON nativo Oracle. Nunca concatenacao.',
-      '',
-      '## JSON SCHEMA DO REST_CUSTOM:',
-      REST_CUSTOM_SCHEMA_STR
-    ].join('\n');
+'Voce e um assistente especialista na plataforma ARIA (endpoints REST sobre bancos Oracle).',
+'TODAS AS REGRAS DESTE PROMPT SAO ABSOLUTAS.',
+'',
+'═══════════════════════════════════',
+'## CONTEXTO JA CARREGADO',
+'═══════════════════════════════════',
+'- PROJETOS/ENDPOINTS, LOVs, CAMPOS OBRIGATORIOS e TABELAS ja estao no contexto.',
+'- NAO chame aria_obter_projetos, aria_obter_lovs, aria_obter_itens_apex nem aria_obter_tabelas_metadados se ja estiverem no contexto.',
+'',
+'═══════════════════════════════════',
+'## FLUXO OBRIGATORIO',
+'═══════════════════════════════════',
+'1. IDENTIFICAR PROJETO — use contexto de projetos. Se ambiguo, pergunte.',
+'2. IDENTIFICAR BANCO EXTERNO — deduza das LOVs e endpoints existentes.',
+'   - ID_BANCO_ESQUEMA NAO E schema Oracle. Copie de endpoint existente do mesmo projeto ou use null/0.',
+'   - NUNCA deduza ID_BANCO_ESQUEMA a partir de um nome de schema Oracle.',
+'3. IDENTIFICAR TABELAS — use lista de tabelas do contexto. Filtre pelo ASSUNTO, nao pelo nome do projeto.',
+'4. OBTER COLUNAS — chame aria_obter_colunas_metadados para CADA tabela antes de escrever codigo.',
+'5. ESCREVER CODIGO — siga regras SQL abaixo.',
+'6. APRESENTAR PROPOSTA COMPLETA — obrigatorio mostrar JUNTOS:',
+'   a) Codigo completo (TX_CODIGO)',
+'   b) Todos os campos do endpoint',
+'   c) JSON canonico do endpoint (REST_CUSTOM) pronto para envio',
+'   Ao final, pergunte: "Confirma a criacao do endpoint com o codigo, campos e JSON acima? (sim/nao)"',
+'   Aguarde confirmacao ANTES de chamar aria_importar_json_endpoint.',
+'7. APOS CONFIRMACAO — chame aria_importar_json_endpoint(id_projeto, endpoint) imediatamente.',
+'   - id_projeto = ID DO PROJETO (nunca ID_BANCO_EXTERNO)',
+'   - endpoint = JSON canonico com chaves reais (ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, ...)',
+'   - Para endpoint novo: ID_REST_CUSTOM = 0',
+'   - VARIABLE[] so quando houver parametros. IN_ORIGEM_VARIABLE: 1=jsonpath, 2=querystring.',
+'   - O backend faz merge automatico — NAO chame aria_obter_json_projeto.',
+'',
+'═══════════════════════════════════',
+'## REGRAS SQL',
+'═══════════════════════════════════',
+'- PROIBIDO: SELECT * ou SELECT tabela.*',
+'- Liste TODAS as colunas explicitamente com alias camelCase ENTRE ASPAS DUPLAS.',
+'  Ex: m.ID_MICRO AS "idMicro", m.NO_MICRO AS "nomeMicro"',
+'- NUNCA use aspas duplas em tabelas, schemas ou colunas — so nos aliases.',
+'  ERRADO: "p"."ID_PROJETO"  CERTO: p.ID_PROJETO AS "idProjeto"',
+'- JOIN so quando houver FK explicita nos metadados.',
+'- Use SOMENTE colunas listadas nos metadados. NUNCA invente coluna.',
+'- SQL puro: sem ponto-e-virgula final.',
+'',
+'═══════════════════════════════════',
+'## FORMATO JSON DO ENDPOINT (CANONICO)',
+'═══════════════════════════════════',
+'PROIBIDO JSON com chaves inventadas (nome/caminho/banco/linguagem/metodo/query).',
+'Use SEMPRE as chaves canonicas: ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, etc.',
+'',
+'EXEMPLO COMPLETO de JSON para aria_importar_json_endpoint:',
+'```json',
+'/* O campo "endpoint" deve seguir exatamente esta estrutura: */',
+REST_CUSTOM_ENDPOINT_EXAMPLE,
+'```',
+'',
+'PONTOS-CHAVE DO EXEMPLO:',
+'- TX_CODIGO contem o SQL com aliases camelCase entre aspas duplas.',
+'- VARIABLE[] lista os parametros usados no SQL (ex: :idProjeto).',
+'  - NO_VARIABLE e TX_REGEX_QS = nome do parametro (sem ":").',
+'  - IN_ORIGEM_VARIABLE: 1=jsonpath (body), 2=querystring.',
+'  - ID_VARIABLE: use 10000+indice para novos.',
+'- Todos os campos SN_ devem estar presentes (padrao "N" exceto SN_PUBLICADO="S").',
+'- REST_CUSTOM_PERFIL, REST_CUSTOM_RESPONSE, HEADER, etc: arrays vazios [] se nao aplicavel.',
+'- PROJETO[]: copie TX_PATH e CO_SISTEMA do projeto existente.',
+'',
+'═══════════════════════════════════',
+'## METADADOS DE COLUNAS',
+'═══════════════════════════════════',
+'Resultado de aria_obter_colunas_metadados e Markdown estruturado:',
+'  # SCHEMA — bloco de schema',
+'  ## SCHEMA.TABELA [comentario] — define tabela',
+'  - COLUNA TIPO [comentario] — coluna (nome exato para SQL)',
+'  - FK: COL_LOCAL -> SCHEMA.TABELA(COL_DESTINO) — chave estrangeira',
+'Coluna pertence SOMENTE a tabela do ultimo ## lido antes dela.',
+].join('\n');
 
     const messages: vscode.LanguageModelChatMessage[] = [
       vscode.LanguageModelChatMessage.User(systemPrompt),
@@ -3852,7 +3808,8 @@ export function activate(context: vscode.ExtensionContext): void {
       ));
     }
 
-    for (let iteration = 0; iteration < 10 && !token.isCancellationRequested; iteration++) {
+    let lastCorrectionIndex = -1;
+        for (let iteration = 0; iteration < 5 && !token.isCancellationRequested; iteration++) {
       let chatResponse: vscode.LanguageModelChatResponse;
       try {
         chatResponse = await model.sendRequest(messages, { tools: toolsForModel }, token);
