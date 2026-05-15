@@ -354,6 +354,55 @@
         }
       },
       {
+        "name": "aria_create_endpoint_draft",
+        "displayName": "ARIA: Criar Draft de Endpoint",
+        "modelDescription": "Cria um rascunho (draft) de endpoint REST para revisao e validacao antes de importar. Retorna um draftId que deve ser usado em aria_validate_endpoint_draft e depois aria_import_endpoint_draft. Envie o objeto do endpoint com todos os campos canonicos (NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, etc). Use ID_REST_CUSTOM=0 para novo endpoint.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id_projeto": {
+              "type": "number",
+              "description": "ID do projeto ARIA onde o endpoint sera criado."
+            },
+            "endpoint": {
+              "type": "object",
+              "description": "Objeto JSON do endpoint (REST_CUSTOM) com campos canonicos."
+            }
+          },
+          "required": ["id_projeto", "endpoint"]
+        }
+      },
+      {
+        "name": "aria_validate_endpoint_draft",
+        "displayName": "ARIA: Validar Draft de Endpoint",
+        "modelDescription": "Valida um draft de endpoint previamente criado com aria_create_endpoint_draft. Verifica campos obrigatorios, regras SQL (SELECT *, aliases camelCase), metadados carregados, VARIABLE e validacoes do servidor. Se houver erros, corrija e crie novo draft. Se valido, apresente a proposta ao usuario.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "draftId": {
+              "type": "string",
+              "description": "ID do draft retornado por aria_create_endpoint_draft."
+            }
+          },
+          "required": ["draftId"]
+        }
+      },
+      {
+        "name": "aria_import_endpoint_draft",
+        "displayName": "ARIA: Importar Draft de Endpoint",
+        "modelDescription": "Importa (salva) um draft de endpoint previamente validado com aria_validate_endpoint_draft. SO chame APOS o usuario confirmar a proposta. O draft deve estar no status 'validated' (sem erros de validacao).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "draftId": {
+              "type": "string",
+              "description": "ID do draft validado retornado por aria_create_endpoint_draft."
+            }
+          },
+          "required": ["draftId"]
+        }
+      },
+      {
         "name": "aria_importar_json",
         "displayName": "ARIA: Importar JSON do Projeto",
         "modelDescription": "Salva um projeto ARIA via /importar-json. Use para criar ou editar endpoints. O json_projeto deve ter a estrutura { 'registros': [{ ...projeto..., REST_CUSTOM: [<apenas o endpoint novo ou editado>] }] }. ID_REST_CUSTOM deve ser 0 para endpoints novos. CONFIRME com o usuário antes de chamar esta ferramenta.",
@@ -367,13 +416,33 @@
           },
           "required": ["json_projeto"]
         }
+      },
+      {
+        "name": "aria_importar_json_endpoint",
+        "displayName": "ARIA: Importar Endpoint",
+        "modelDescription": "Cria ou edita um endpoint REST_CUSTOM no projeto ARIA. Envie APENAS o objeto do endpoint — o backend busca o projeto completo, preserva os endpoints existentes e faz merge automatico. Use ID_REST_CUSTOM=0 para criar novo ou o ID existente para editar. SO chame esta tool APOS o usuario confirmar a proposta.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id_projeto": {
+              "type": "number",
+              "description": "ID do projeto ARIA onde o endpoint sera criado ou editado."
+            },
+            "endpoint": {
+              "type": "object",
+              "description": "Objeto JSON do endpoint (REST_CUSTOM) com todos os campos: NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, etc."
+            }
+          },
+          "required": ["id_projeto", "endpoint"]
+        }
       }
     ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "test": "tsc -p tsconfig.test.json && node --test out-test/tests/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.14.2",
