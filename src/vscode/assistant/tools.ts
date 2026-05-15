@@ -183,12 +183,26 @@ export function registerTools(
       async invoke(options, _token) {
         if (!state.client) { return notConnectedResult(); }
         const rawInput = options.input as Record<string, unknown>;
-        const idProjeto = Number(rawInput.id_projeto);
+        let idProjeto = toNumber(rawInput.id_projeto);
         if (!(idProjeto > 0)) {
           return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('Parametro invalido: id_projeto deve ser > 0.')]);
         }
 
         let endpoint = asRecord(rawInput.endpoint);
+        // If endpoint not provided, allow passing an endpoint id to edit existing endpoint
+        if (!endpoint) {
+          const endpointId = toNumber(rawInput.id_endpoint ?? rawInput.ID_REST_CUSTOM ?? rawInput.id);
+          if (endpointId > 0) {
+            try {
+              // Try to load project details and find the endpoint
+              const project = await state.getProjectDetails(idProjeto);
+              const found = (project.REST_CUSTOM || []).find((e) => toNumber((e as any).ID_REST_CUSTOM) === endpointId);
+              if (found) { endpoint = found as Record<string, unknown>; }
+            } catch {
+              // ignore and fallthrough to error below
+            }
+          }
+        }
         if (!endpoint && rawInput.NO_REST_CUSTOM) {
           const { id_projeto: _id, ...rest } = rawInput;
           endpoint = rest;
@@ -196,9 +210,7 @@ export function registerTools(
         if (!endpoint) {
           return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(
-              'Parametro invalido: endpoint nao encontrado no input. ' +
-              'Use o formato exato aria_create_endpoint_draft({"id_projeto": 123, "endpoint": { ...json canonico do endpoint... }}). ' +
-              'Nao envie apenas id_projeto.'
+              'Parametro invalido: endpoint nao encontrado no input. Forneca o objeto endpoint ou informe id_projeto e id_endpoint.'
             )
           ]);
         }
@@ -235,7 +247,9 @@ export function registerTools(
           const extracted = extractVariablesFromCode(normalized.TX_CODIGO);
           if (extracted.length) { normalized.VARIABLE = extracted; }
         } else if (vars.length) {
-          normalized.VARIABLE = normalizeVariables(vars);
+          const nv = normalizeVariables(vars, (m) => output.appendLine(`[normalizeVariables] ${m}`));
+          normalized.VARIABLE = nv.normalized;
+          if (nv.errors?.length) { output.appendLine(`[normalizeVariables] errors: ${nv.errors.join('; ')}`); }
         }
 
         // Strip trailing semicolons for SQL
@@ -333,11 +347,10 @@ export function registerTools(
         }
 
         // Server-side validations
-        try {
-          const validations = await state.getEndpointValidations();
-          const validationErrors = validateEndpointPayload(endpoint, validations);
-          issues.push(...validationErrors);
-        } catch { /* ignore */ }
+        // Server-side validations are not provided to the assistant context.
+        // Skip fetching endpoint validations here to avoid leaking them into LM tools.
+        const validationErrors = validateEndpointPayload(endpoint);
+        issues.push(...validationErrors);
 
         state.draftStore.markValidated(draftId, issues, warnings);
 
@@ -468,7 +481,9 @@ export function registerTools(
           // Normalize variables
           const vars = asArray((incomingEndpoint as any).VARIABLE) ?? [];
           if (vars.length) {
-            (incomingEndpoint as any).VARIABLE = normalizeVariables(vars);
+            const nv = normalizeVariables(vars, (m) => output.appendLine(`[normalizeVariables] ${m}`));
+            (incomingEndpoint as any).VARIABLE = nv.normalized;
+            if (nv.errors?.length) { output.appendLine(`[normalizeVariables] errors: ${nv.errors.join('; ')}`); }
           } else if (typeof incomingEndpoint.TX_CODIGO === 'string') {
             const extracted = extractVariablesFromCode(incomingEndpoint.TX_CODIGO);
             if (extracted.length) { (incomingEndpoint as any).VARIABLE = extracted; }

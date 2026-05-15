@@ -69,19 +69,10 @@ export class AriaApiClient {
   }
 
   async getEndpointValidations(): Promise<EndpointValidationItem[]> {
-    const validations: EndpointValidationItem[] = [];
-    let endpointPath = '/v1/aria-vscode/custom/validacoes-apex';
-    const visited = new Set<string>();
-    while (endpointPath && !visited.has(endpointPath)) {
-      visited.add(endpointPath);
-      const response = await this.request<unknown>('GET', endpointPath);
-      const root = asRecord(response);
-      const rows = asArray(root?.registros) || [];
-      validations.push(...rows.map((item) => this.mapEndpointValidation(item)));
-      const next = typeof root?.next === 'string' ? root.next.trim() : '';
-      endpointPath = next || '';
-    }
-    return validations;
+    const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/validacoes-apex');
+    const root = asRecord(response);
+    const rows = asArray(root?.registros) || [];
+    return rows.map((item) => this.mapEndpointValidation(item));
   }
 
   async getLovs(projectId: number): Promise<AriaLovs> {
@@ -187,11 +178,18 @@ export class AriaApiClient {
     if (query) { for (const [key, value] of Object.entries(query)) { url.searchParams.set(key, value); } }
 
     const payload = body === undefined ? undefined : JSON.stringify(body);
-    this.logger?.(
-      `[${new Date().toISOString()}] ms-aria request => ${method} ${url.pathname}${url.search}\n` +
-      `  query: ${summarizeForLog(query)}\n` +
-      `  body: ${summarizeForLog(this.buildRequestBodyForLog(endpointPath, body))}`
-    );
+    try {
+      const bodyPreview = (endpointPath.includes('/importar-json-endpoint'))
+        ? (body === undefined ? undefined : JSON.parse(JSON.stringify(body)))
+        : this.buildRequestBodyForLog(endpointPath, body);
+      this.logger?.(
+        `[${new Date().toISOString()}] ms-aria request => ${method} ${url.pathname}${url.search}\n` +
+        `  query: ${summarizeForLog(query)}\n` +
+        `  body: ${endpointPath.includes('/importar-json-endpoint') ? JSON.stringify(bodyPreview, null, 2) : summarizeForLog(bodyPreview)}`
+      );
+    } catch (e) {
+      this.logger?.(`[${new Date().toISOString()}] ms-aria request => ${method} ${url.pathname}${url.search} (failed to build log: ${String(e)})`);
+    }
 
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (payload !== undefined) {
