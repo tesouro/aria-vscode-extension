@@ -2708,6 +2708,29 @@ export function activate(context: vscode.ExtensionContext): void {
             registros: enrichedProjects
           };
 
+          // Enriquecer endpoints com campos de display das LOVs (quando ID presente mas NO_ ausente)
+          for (const project of payload.registros ?? []) {
+            const projectId = toNumber(project.ID_PROJETO);
+            try {
+              let lovs = lovsCache.get(projectId);
+              if (!lovs) {
+                lovs = await client.getLovs(projectId);
+                lovsCache.set(projectId, lovs);
+              }
+
+              for (const epRaw of project.REST_CUSTOM ?? []) {
+                const ep = asRecord(epRaw) ?? {};
+                const enriched = applyLovDisplayValues(ep, lovs);
+                // copy enriched values back onto the endpoint object
+                for (const [k, v] of Object.entries(enriched)) {
+                  ep[k] = v;
+                }
+              }
+            } catch (e) {
+              output.appendLine(`[${new Date().toISOString()}] aviso: falha ao carregar LOVs para projeto ${projectId}: ${toErrorMessage(e)}`);
+            }
+          }
+
           // Normalize VARIABLE entries: ensure TX_REGEX_QS exists (can be same as NO_VARIABLE)
           for (const project of payload.registros ?? []) {
             for (const endpointRaw of project.REST_CUSTOM ?? []) {
@@ -2928,7 +2951,7 @@ export function activate(context: vscode.ExtensionContext): void {
           // 1) { id_projeto, endpoint: { NO_REST_CUSTOM, ... } }  — formato esperado
           // 2) { id_projeto, endpoint: { REST_CUSTOM: [{ NO_REST_CUSTOM, ... }] } } — modelo envelopou em REST_CUSTOM
           // 3) { id_projeto, NO_REST_CUSTOM, ... } — modelo colocou campos no nivel raiz
-          let resolvedEndpoint: Record<string, unknown> | undefined;
+          let endpoint: Record<string, unknown> | undefined;
 
           output.appendLine(`--JSON só do endpoint --`);
           output.appendLine(JSON.stringify(rawInput.endpoint, null, 2));
@@ -2937,28 +2960,24 @@ export function activate(context: vscode.ExtensionContext): void {
           const endpointField = rawInput.endpoint;
           if (endpointField && typeof endpointField === 'object' && !Array.isArray(endpointField)) {
             const epRecord = endpointField as Record<string, unknown>;
-            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(epRecord).join(', ')}`);
-
             // Caso 2: o modelo enviou { REST_CUSTOM: [...] } como endpoint
             const restCustomArray = asArray(epRecord.REST_CUSTOM);
             if (restCustomArray && restCustomArray.length > 0 && !epRecord.NO_REST_CUSTOM && !epRecord.TX_PATH) {
               const firstEp = asRecord(restCustomArray[0]);
               if (firstEp) {
-                output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: extraindo primeiro item de REST_CUSTOM[] como endpoint`);
-                resolvedEndpoint = firstEp;
+                endpoint = firstEp;
               }
             } else {
               // Caso 1: formato esperado
-              resolvedEndpoint = epRecord;
+              endpoint = epRecord;
             }
           } else if (!endpointField && rawInput.NO_REST_CUSTOM) {
             // Caso 3: campos no nivel raiz
-            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: usando campos do nivel raiz como endpoint`);
             const { id_projeto: _id, ...rest } = rawInput;
-            resolvedEndpoint = rest;
+            endpoint = rest;
           }
 
-          if (!resolvedEndpoint) {
+          if (!endpoint) {
             output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - nao conseguiu resolver endpoint do input`);
             output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: input completo = ${JSON.stringify(rawInput).slice(0, 2000)}`);
             return new vscode.LanguageModelToolResult([
@@ -2969,79 +2988,94 @@ export function activate(context: vscode.ExtensionContext): void {
             ]);
           }
 
-          // Busca o projeto completo do servidor
-          const fullDataset = await client.getDatasetByProjectId(idProjeto);
-          const fullProject = fullDataset.registros.find((item) => item.ID_PROJETO === idProjeto);
-          if (!fullProject) {
-            return new vscode.LanguageModelToolResult([
-              new vscode.LanguageModelTextPart(`Importacao bloqueada: projeto ${idProjeto} nao encontrado no gerar-json.`)
-            ]);
-          }
-
-          const fullProjectEndpoints = fullProject.REST_CUSTOM ?? [];
-
-          // Se o modelo mandou um envelope com REST_CUSTOM, tenta extrair somente o endpoint editado.
-          const envelopeRestCustom = asArray(resolvedEndpoint.REST_CUSTOM);
-          if (envelopeRestCustom && envelopeRestCustom.length > 0) {
-            const extractedEndpoint = extractSingleEditedEndpointFromEnvelope(resolvedEndpoint, fullProjectEndpoints);
-            if (extractedEndpoint) {
-              output.appendLine(
-                `[${new Date().toISOString()}] aria_importar_json_endpoint: extraindo somente o endpoint editado de envelope com REST_CUSTOM (${envelopeRestCustom.length} item(ns)).`
-              );
-              resolvedEndpoint = extractedEndpoint;
-            } else {
-              output.appendLine(
-                `[${new Date().toISOString()}] aria_importar_json_endpoint: envelope com REST_CUSTOM nao permitiu identificar um unico endpoint editado.`
-              );
-              return new vscode.LanguageModelToolResult([
-                new vscode.LanguageModelTextPart(
-                  'Parametro invalido: envie somente o endpoint editado em endpoint, sem REST_CUSTOM/projeto completo. ' +
-                  'Se o payload veio de um projeto inteiro, recorte apenas um endpoint.'
-                )
-              ]);
-            }
-          }
-
           // Remove campos de wrapper se ainda vierem junto.
           const {
             REST_CUSTOM: _ignoredRestCustom,
             PROJETO: _ignoredProject,
             REST_CUSTOM_JSON_SCHEMA: _ignoredSchema,
             ...endpointClean
-          } = resolvedEndpoint;
+          } = endpoint;
           const incomingEndpoint = endpointClean as unknown as AriaEndpoint;
           const incomingId = toNumber((incomingEndpoint as Record<string, unknown>).ID_REST_CUSTOM);
 
-          const incomingRecord = incomingEndpoint as unknown as Record<string, unknown>;
-          const hasFriendlyShape =
-            ('nome' in incomingRecord) ||
-            ('caminho' in incomingRecord) ||
-            ('banco' in incomingRecord) ||
-            ('linguagem' in incomingRecord) ||
-            ('metodo' in incomingRecord) ||
-            ('query' in incomingRecord);
-          const hasCanonicalShape =
-            ('NO_REST_CUSTOM' in incomingRecord) ||
-            ('TX_PATH' in incomingRecord) ||
-            ('TX_CODIGO' in incomingRecord) ||
-            ('ID_METODO' in incomingRecord) ||
-            ('ID_TIPO_CODIGO' in incomingRecord) ||
-            ('ID_BANCO_EXTERNO' in incomingRecord);
-
-          if (hasFriendlyShape && !hasCanonicalShape) {
-            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - formato amigavel/inventado detectado`);
-            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingRecord).join(', ')}`);
-            return new vscode.LanguageModelToolResult([
-              new vscode.LanguageModelTextPart(
-                'Parametro invalido: endpoint em formato nao canonico. ' +
-                'Nao use chaves amigaveis como nome/caminho/banco/linguagem/metodo/query. ' +
-                'Use o objeto REST_CUSTOM com chaves reais, por exemplo: ' +
-                '{ ID_REST_CUSTOM, NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, ... }. ' +
-                'VARIABLE[] e opcional: inclua apenas se houver parametros.'
-              )
-            ]);
+          // Enriquecer com LOVs
+          try {
+            let lovs = lovsCache.get(idProjeto);
+            if (!lovs) {
+              lovs = await client.getLovs(idProjeto);
+              lovsCache.set(idProjeto, lovs);
+            }
+            const enriched = applyLovDisplayValues(asRecord(incomingEndpoint) ?? {}, lovs);
+            for (const [k, v] of Object.entries(enriched)) {
+              (incomingEndpoint as Record<string, unknown>)[k] = v;
+            }
+          } catch (e) {
+            output.appendLine(`[${new Date().toISOString()}] aviso: falha ao carregar LOVs para projeto ${idProjeto}: ${toErrorMessage(e)}`);
           }
 
+          // Preencher VARIABLE automaticamente se ausente ou vazio
+          let vars = asArray((incomingEndpoint as any).VARIABLE) ?? [];
+          const reservedNames = new Set([
+            'aria_perfis_usuario',
+            'aria_id_usuario',
+            'aria_login_usuario',
+            'aria_email_usuario',
+            'request_body'
+          ].map((s) => s.toLowerCase()));
+
+          if (!vars.length) {
+            // Extrai variáveis do código (ex: :id_projeto, {id_projeto}, $id_projeto)
+            const codigo = toStringSafe((incomingEndpoint as any).TX_CODIGO);
+            const foundVars = new Set<string>();
+            // SQL/Python: :nome, {nome}, $nome
+            const regexes = [
+              /:([a-zA-Z_][a-zA-Z0-9_]*)/g, // :nome
+              /\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, // {nome}
+              /\$([a-zA-Z_][a-zA-Z0-9_]*)/g // $nome
+            ];
+            for (const re of regexes) {
+              let m: RegExpExecArray | null;
+              while ((m = re.exec(codigo))) {
+                const n = m[1];
+                if (!reservedNames.has(n.toLowerCase())) {
+                  foundVars.add(n);
+                }
+              }
+            }
+            if (foundVars.size > 0) {
+              vars = Array.from(foundVars).map((nome, idx) => ({
+                ID_VARIABLE: 10000 + idx,
+                NO_VARIABLE: nome,
+                TX_REGEX_QS: nome,
+                TX_DESCRICAO: 'Descrição da Variável (colocar aqui texto em IA.'
+              }));
+              (incomingEndpoint as any).VARIABLE = vars;
+            }
+          } else if (vars.length > 0) {
+            // Normaliza VARIABLE existente, removendo reservadas
+            const normalizedVars: Record<string, unknown>[] = [];
+            for (let vi = 0; vi < vars.length; vi++) {
+              const rawVar = asRecord(vars[vi]) || {};
+              const noVariable = toStringSafe(rawVar.NO_VARIABLE || rawVar.TX_REGEX_QS).trim() || '';
+              if (!noVariable || reservedNames.has(noVariable.toLowerCase())) {
+                continue;
+              }
+              const txRegex = toStringSafe(rawVar.TX_REGEX_QS).trim() || noVariable;
+              normalizedVars.push({
+                ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
+                NO_VARIABLE: noVariable,
+                TX_REGEX_QS: txRegex,
+                IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE,
+                TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
+              });
+            }
+            (incomingEndpoint as any).VARIABLE = normalizedVars;
+          }
+          if (isSqlEndpointCodeType(incomingEndpoint) && typeof incomingEndpoint.TX_CODIGO === 'string' && incomingEndpoint.TX_CODIGO.trim()) {
+            incomingEndpoint.TX_CODIGO = incomingEndpoint.TX_CODIGO.trimEnd().replace(/;+$/, '');
+          }
+
+          // Validações obrigatórias (campos obrigatórios, metadados, SELECT *, aliases)
           const requiredEndpointFields: Array<keyof AriaEndpoint> = [
             'NO_REST_CUSTOM',
             'TX_PATH',
@@ -3050,20 +3084,18 @@ export function activate(context: vscode.ExtensionContext): void {
             'ID_TIPO_CODIGO',
             'ID_BANCO_EXTERNO',
           ];
-
           const missingRequiredFields = requiredEndpointFields.filter((field) => {
-            const value = incomingRecord[String(field)];
+            const value = (incomingEndpoint as any)[String(field)];
             if (typeof value === 'number') {
               return !(value > 0);
             }
             return !toStringSafe(value).trim();
           });
-
           if (missingRequiredFields.length > 0) {
             output.appendLine(
               `[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - endpoint sem campos obrigatorios: ${missingRequiredFields.join(', ')}`
             );
-            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingRecord).join(', ')}`);
+            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingEndpoint).join(', ')}`);
             return new vscode.LanguageModelToolResult([
               new vscode.LanguageModelTextPart(
                 'Parametro invalido: endpoint (REST_CUSTOM) incompleto. Campos obrigatorios ausentes: ' +
@@ -3072,7 +3104,6 @@ export function activate(context: vscode.ExtensionContext): void {
               )
             ]);
           }
-
           if (!incomingEndpoint.NO_REST_CUSTOM && !incomingEndpoint.TX_PATH) {
             output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: ERRO - endpoint sem NO_REST_CUSTOM e TX_PATH`);
             output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint keys = ${Object.keys(incomingEndpoint).join(', ')}`);
@@ -3083,92 +3114,17 @@ export function activate(context: vscode.ExtensionContext): void {
             ]);
           }
 
-          output.appendLine(
-            `[${new Date().toISOString()}] aria_importar_json_endpoint: endpoint resolvido: ` +
-            `NO_REST_CUSTOM=${toStringSafe(incomingEndpoint.NO_REST_CUSTOM)}, TX_PATH=${toStringSafe(incomingEndpoint.TX_PATH)}, ` +
-            `ID_REST_CUSTOM=${toNumber(incomingEndpoint.ID_REST_CUSTOM)}`
-          );
-
-          const existingEndpointIds = new Set(
-            (fullProject.REST_CUSTOM ?? []).map((ep) => toNumber(ep.ID_REST_CUSTOM))
-          );
-
-          output.appendLine(
-            `[${new Date().toISOString()}] aria_importar_json_endpoint: projeto ${idProjeto} (${toStringSafe(fullProject.NO_PROJETO)}) ` +
-            `tem ${fullProject.REST_CUSTOM?.length ?? 0} endpoint(s) existentes: [${Array.from(existingEndpointIds).join(', ')}]`
-          );
-
-          // Merge: preserva endpoints existentes; adiciona novo (ID=0) ou substitui existente (ID>0)
-          const mergedEps: AriaEndpoint[] = [...(fullProject.REST_CUSTOM ?? [])];
-          if (incomingId > 0) {
-            const idx = mergedEps.findIndex((ep) => toNumber(ep.ID_REST_CUSTOM) === incomingId);
-            if (idx >= 0) {
-              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: substituindo endpoint existente idx=${idx} (ID=${incomingId})`);
-              mergedEps[idx] = incomingEndpoint;
-            } else {
-              output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: adicionando endpoint com ID=${incomingId} (nao encontrado nos existentes)`);
-              mergedEps.push(incomingEndpoint);
-            }
-          } else {
-            output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: adicionando endpoint novo (ID_REST_CUSTOM=0)`);
-            mergedEps.push(incomingEndpoint);
-          }
-
-          output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: total de endpoints apos merge: ${mergedEps.length}`);
-
-          const mergedProject = {
-            ...(fullProject as Record<string, unknown>),
-            ID_PROJETO: idProjeto,
-            REST_CUSTOM: mergedEps
-          } as AriaProject;
-
-          const payload: AriaDataset = {
-            registros: [mergedProject]
-          };
-
-          // Normalize VARIABLE entries
-          for (const endpointRaw of mergedProject.REST_CUSTOM ?? []) {
-            const ep = endpointRaw as Record<string, unknown>;
-            const vars = asArray(ep.VARIABLE) ?? [];
-            if (vars.length > 0) {
-              const normalizedVars: Record<string, unknown>[] = [];
-              for (let vi = 0; vi < vars.length; vi++) {
-                const rawVar = asRecord(vars[vi]) || {};
-                const noVariable = toStringSafe(rawVar.NO_VARIABLE || rawVar.TX_REGEX_QS).trim() || '';
-                const txRegex = toStringSafe(rawVar.TX_REGEX_QS).trim() || noVariable;
-                normalizedVars.push({
-                  ID_VARIABLE: toNumber(rawVar.ID_VARIABLE) || 10000 + vi,
-                  NO_VARIABLE: noVariable,
-                  TX_REGEX_QS: txRegex,
-                  IN_ORIGEM_VARIABLE: rawVar.IN_ORIGEM_VARIABLE,
-                  TX_DESCRICAO: toStringSafe(rawVar.TX_DESCRICAO)
-                });
-              }
-              ep.VARIABLE = normalizedVars;
-            }
-
-            // Remove trailing semicolons from TX_CODIGO for pure SQL
-            if (isSqlEndpointCodeType(ep) && typeof ep.TX_CODIGO === 'string' && ep.TX_CODIGO.trim()) {
-              ep.TX_CODIGO = ep.TX_CODIGO.trimEnd().replace(/;+$/, '');
-            }
-          }
-
-          // Validacoes de metadados e SELECT * (apenas para o endpoint incoming, nao os existentes)
-          const isNewEndpoint = incomingId <= 0 || !existingEndpointIds.has(incomingId);
-          const ep = incomingEndpoint as unknown as Record<string, unknown>;
-
-          if (isNewEndpoint && isSqlEndpointCodeType(ep)) {
-            const idBancoExterno = toNumber(ep.ID_BANCO_EXTERNO);
-            const idBancoEsquema = toNumber(ep.ID_BANCO_ESQUEMA);
-            const endpointName = toStringSafe(ep.NO_REST_CUSTOM) || '(sem nome)';
-            const endpointPath = toStringSafe(ep.TX_PATH) || '(sem path)';
-
+          // Validação de metadados e SQL (apenas para endpoint novo)
+          if (isSqlEndpointCodeType(incomingEndpoint)) {
+            const idBancoExterno = toNumber((incomingEndpoint as any).ID_BANCO_EXTERNO);
+            const idBancoEsquema = toNumber((incomingEndpoint as any).ID_BANCO_ESQUEMA);
+            const endpointName = toStringSafe((incomingEndpoint as any).NO_REST_CUSTOM) || '(sem nome)';
+            const endpointPath = toStringSafe((incomingEndpoint as any).TX_PATH) || '(sem path)';
             if (!(idBancoExterno > 0)) {
               return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(`Importacao bloqueada: ${endpointName} [${endpointPath}] - ID_BANCO_EXTERNO ausente.`)
               ]);
             }
-
             const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
             const metadataUri = metadataUriByEndpoint.get(metadataKey);
             if (!metadataUri) {
@@ -3179,12 +3135,10 @@ export function activate(context: vscode.ExtensionContext): void {
                 new vscode.LanguageModelTextPart(`Importacao bloqueada: metadados nao carregados. Execute ${suggest} primeiro.`)
               ]);
             }
-
             try {
               const metadataText = await fs.promises.readFile(metadataUri.fsPath, 'utf8');
               const catalogTables = new Set(extractMetadataTableNames(metadataText).map((item) => item.toUpperCase()));
-              const sqlTables = extractSqlReferencedTables(toStringSafe(ep.TX_CODIGO));
-
+              const sqlTables = extractSqlReferencedTables(toStringSafe((incomingEndpoint as any).TX_CODIGO));
               for (const sqlTable of sqlTables) {
                 const exact = catalogTables.has(sqlTable);
                 const bySuffix = !sqlTable.includes('.')
@@ -3203,8 +3157,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 new vscode.LanguageModelTextPart(`Importacao bloqueada: falha ao ler metadados: ${toErrorMessage(error)}`)
               ]);
             }
-
-            if (hasSelectStar(toStringSafe(ep.TX_CODIGO))) {
+            if (hasSelectStar(toStringSafe((incomingEndpoint as any).TX_CODIGO))) {
               output.appendLine(`[${new Date().toISOString()}] aria_importar_json_endpoint: BLOQUEADO - SELECT * detectado`);
               return new vscode.LanguageModelToolResult([
                 new vscode.LanguageModelTextPart(
@@ -3212,9 +3165,8 @@ export function activate(context: vscode.ExtensionContext): void {
                 )
               ]);
             }
-
             // Verifica aliases camelCase
-            const txCodigo = toStringSafe(ep.TX_CODIGO);
+            const txCodigo = toStringSafe((incomingEndpoint as any).TX_CODIGO);
             const aliasIssues = analyzeSqlAliasIssues(txCodigo);
             if (aliasIssues.missingAlias.length > 0 || aliasIssues.nonMnemonicAlias.length > 0) {
               const problems: string[] = [];
@@ -3228,29 +3180,20 @@ export function activate(context: vscode.ExtensionContext): void {
             }
           }
 
-          const payloadStr = JSON.stringify(payload, null, 2);
+          // Salva payload de debug
+          const payloadStr = JSON.stringify(incomingEndpoint, null, 2);
           const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
           await fs.promises.writeFile(filePath, payloadStr, 'utf8');
           output.appendLine(
             `[${new Date().toISOString()}] aria_importar_json_endpoint: projeto=${idProjeto}, ` +
-            `endpoint=${toStringSafe(ep.NO_REST_CUSTOM)}, ID_REST_CUSTOM=${incomingId}, ${payloadStr.length} bytes`
+            `endpoint=${toStringSafe((incomingEndpoint as any).NO_REST_CUSTOM)}, ID_REST_CUSTOM=${incomingId}, ${payloadStr.length} bytes`
           );
-          
-
           output.appendLine('--- JSON gerado ---');
           output.appendLine(payloadStr);
           output.appendLine('--- fim do JSON ---');
 
-          // Envia somente o JSON do endpoint tal como fornecido pelo modelo.
-          let endpointBody: unknown;
-          if (rawInput && Object.prototype.hasOwnProperty.call(rawInput, 'endpoint')) {
-            endpointBody = rawInput.endpoint;
-          } else {
-            const { id_projeto: _ignoreId, ...rest } = rawInput;
-            endpointBody = rest;
-          }
-
-          const importResult = await client.importarJsonEndpoint(idProjeto, endpointBody);
+          // Envia apenas o endpoint ajustado
+          const importResult = await client.importarJsonEndpoint(idProjeto, incomingEndpoint);
           if (importResult?.status !== 'ok') {
             throw new Error(importResult?.mensagem || 'API retornou status diferente de ok ao importar endpoint.');
           }
@@ -3259,12 +3202,12 @@ export function activate(context: vscode.ExtensionContext): void {
           tree.refresh();
 
           const action = incomingId > 0 ? 'editado' : 'criado';
-          const endpointName = toStringSafe(ep.NO_REST_CUSTOM) || '(sem nome)';
-          const endpointPath = toStringSafe(ep.TX_PATH) || '(sem path)';
+          const endpointName = toStringSafe((incomingEndpoint as any).NO_REST_CUSTOM) || '(sem nome)';
+          const endpointPath = toStringSafe((incomingEndpoint as any).TX_PATH) || '(sem path)';
           return new vscode.LanguageModelToolResult([
             new vscode.LanguageModelTextPart(
               `Endpoint ${action} com sucesso.\n` +
-              `- Projeto: ${idProjeto} (${toStringSafe(fullProject.NO_PROJETO)})\n` +
+              `- Projeto: ${idProjeto}\n` +
               `- Endpoint: ${endpointName} (TX_PATH=${endpointPath}, ID_REST_CUSTOM=${incomingId})\n` +
               'Arvore de projetos atualizada.'
             )
@@ -3511,7 +3454,18 @@ export function activate(context: vscode.ExtensionContext): void {
       '     a) O codigo completo (TX_CODIGO)',
       '     b) TODOS os campos do endpoint: NO_REST_CUSTOM, TX_PATH, ID_METODO, NO_METODO, ID_TIPO_CODIGO,',
       '        ID_BANCO_EXTERNO, ID_BANCO_ESQUEMA, DS_REST_CUSTOM_CURTA, TX_COMENTARIOS, e demais campos relevantes.',
-      '   Peca confirmacao do usuario 1 vez.',
+      '     c) O objeto JSON do endpoint (REST_CUSTOM) formatado e pronto para envio.',
+      '   AO FINAL da resposta da proposta, pergunte explicitamente ao usuario se ele confirma a criacao do endpoint.',
+      '   Use esta frase exatamente ao final: "Confirma a criacao do endpoint com o codigo, campos e JSON acima? (sim/não)"',
+      '   Aguarde a resposta do usuario. NAO chame aria_importar_json_endpoint sem confirmacao explicita.',
+      '',
+      '   ANTES de gerar o JSON do endpoint (REST_CUSTOM):',
+      '     - Preencha TODOS os campos obrigatorios listados em "CONTEXTO - Campos obrigatorios".',
+      '     - Para campos do tipo ID_/NO_ use os valores das LOVs carregadas no contexto quando existirem.',
+      '     - Se metadados foram carregados (arquivos metadata-... no contexto), e a proposta usa essas tabelas,',
+      '       DEFINA `ID_BANCO_EXTERNO` exatamente como o valor usado para buscar os metadados. NAO omita `ID_BANCO_EXTERNO`.',
+      '     - Inclua `CO_BANCO_EXTERNO` correspondente e `ID_BANCO_ESQUEMA` quando puder ser inferido. Se nao puder inferir ID_BANCO_ESQUEMA, use 0 explicitamente.',
+      '     - Se algum campo obrigatorio nao puder ser inferido, PERCURTE a pergunta objetiva ao usuario solicitando apenas esse valor.',
       '',
       '7. APOS CONFIRMACAO DO USUARIO:',
       '   - Chame aria_importar_json_endpoint(id_projeto, endpoint) passando:',
@@ -3585,6 +3539,13 @@ export function activate(context: vscode.ExtensionContext): void {
       '  - NUNCA escreva `"p"."ID_PROJETO"` nem `"SCHEMA"."TABELA"`. Use `p.ID_PROJETO AS "idProjeto"`.',
       '  - Use SCHEMA.TABELA nas clausulas FROM/JOIN.',
       '  - NUNCA termine SQL puro com ponto e virgula (;).',
+      '  - FORMATAÇÃO OBRIGATÓRIA: formate consultas SQL com indentação consistente, palavras-chave em MAIÚSCULAS,',
+      '    cada coluna em uma linha separada com seu alias entre aspas duplas, e quebras de linha legíveis para SELECT/FROM/JOIN/WHERE/GROUP BY/ORDER BY.',
+      '    Exemplo de estilo aceitável:',
+      '      SELECT t.ID_COL AS "idCol", t.NO_COL AS "nomeCol"',
+      '      FROM SCHEMA.TABELA t',
+      '      WHERE t.FLAG = 1',
+      '    Sempre preserve a legibilidade; o JSON do endpoint deve conter o TX_CODIGO já formatado assim.',
       '',
       '════════════════════════════════════════',
       '## PL/SQL — REGRAS OBRIGATORIAS (tipo PLSQL)',
@@ -5129,9 +5090,17 @@ function buildRequiredEndpointFieldKeys(items?: EndpointFormItem[]): string[] {
       const displayAs = String(item.DISPLAY_AS || '').trim().toLowerCase();
       return displayAs !== 'hidden' && displayAs !== 'display only';
     })
-    .map((item) => normalizeEndpointFieldKey(item.ITEM_NAME));
+    .map((item) => {
+      // When ITEM_SOURCE_TYPE indicates a database column, prefer ITEM_SOURCE
+      const sourceType = String(item.ITEM_SOURCE_TYPE || '').trim().toLowerCase();
+      const itemSource = typeof item.ITEM_SOURCE === 'string' ? item.ITEM_SOURCE.trim() : '';
+      if (itemSource && sourceType.includes('database column')) {
+        return normalizeEndpointFieldKey(itemSource);
+      }
+      return normalizeEndpointFieldKey(item.ITEM_NAME);
+    });
 
-  return Array.from(new Set(required));
+  return Array.from(new Set(required)).filter(Boolean);
 }
 
 function isMissingRequiredField(fieldName: string, value: unknown): boolean {
