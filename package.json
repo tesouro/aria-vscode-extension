@@ -66,6 +66,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "aria.createProject",
+        "title": "ARIA: Novo Projeto",
+        "icon": "$(add)"
+      },
+      {
         "command": "aria.editProjectJson",
         "title": "Editar JSON"
       },
@@ -125,6 +130,11 @@
           "command": "aria.refreshTree",
           "when": "view == ariaProjectsView",
           "group": "navigation@2"
+        },
+        {
+          "command": "aria.createProject",
+          "when": "view == ariaProjectsView",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [

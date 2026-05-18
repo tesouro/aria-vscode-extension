@@ -250,6 +250,47 @@ function activate(context) {
         state.dataset = await client.getProjectEndpointTree();
         tree.refresh();
     };
+    const saveDatasetWithFreshSnapshot = async (source, mutate) => {
+        const client = state.getClient();
+        const freshDataset = await client.getProjectEndpointTree();
+        for (const project of freshDataset.registros) {
+            for (const ep of project.REST_CUSTOM ?? []) {
+                ep.SN_MODO_COMPATIBILIDADE = 'N';
+                if (ep.IN_TIPO_TRANSFORMACAO === '') {
+                    ep.IN_TIPO_TRANSFORMACAO = null;
+                }
+            }
+        }
+        await mutate(freshDataset);
+        const payloadStr = JSON.stringify(freshDataset, null, 2);
+        const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
+        await fs.promises.writeFile(filePath, payloadStr, 'utf8');
+        state.lastPayloadPath = filePath;
+        output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
+        await client.saveDataset(freshDataset);
+        state.dataset = await client.getProjectEndpointTree();
+        tree.refresh();
+    };
+    const saveProjectWithFreshSnapshot = async (source, projectPayload) => {
+        const client = state.getClient();
+        const freshDataset = await client.getProjectEndpointTree();
+        const projectPath = (0, utils_1.toStringSafe)(projectPayload.TX_PATH).trim().toLowerCase();
+        if (!projectPath) {
+            throw new Error('Path do projeto e obrigatorio.');
+        }
+        if (freshDataset.registros.some((project) => (0, utils_1.toStringSafe)(project.TX_PATH).trim().toLowerCase() === projectPath)) {
+            throw new Error(`Ja existe projeto com TX_PATH "${(0, utils_1.toStringSafe)(projectPayload.TX_PATH).trim()}".`);
+        }
+        const wrappedPayload = { registros: [projectPayload] };
+        const payloadStr = JSON.stringify(wrappedPayload, null, 2);
+        const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
+        await fs.promises.writeFile(filePath, payloadStr, 'utf8');
+        state.lastPayloadPath = filePath;
+        output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
+        await client.saveProject(projectPayload);
+        state.dataset = await client.getProjectEndpointTree();
+        tree.refresh();
+    };
     const saveEditedDocument = async (document) => {
         const marker = state.editMap.get(document.uri.toString());
         if (!marker) {
@@ -380,6 +421,28 @@ function activate(context) {
                 }
                 draft.registros[idx] = mergePreservingTypes(draft.registros[idx], normalized);
             });
+        });
+    }), vscode.commands.registerCommand('aria.createProject', async () => {
+        if (!state.client) {
+            vscode.window.showWarningMessage('Conecte primeiro.');
+            return;
+        }
+        const formData = { NO_PROJETO: '', DS_PROJETO: '', TX_PATH: '' };
+        (0, form_webview_1.openFormWebview)(context, 'Novo Projeto', formData, [], undefined, async (updated) => {
+            const projectName = (0, utils_1.toStringSafe)(updated.NO_PROJETO).trim();
+            const projectDescription = (0, utils_1.toStringSafe)(updated.DS_PROJETO).trim();
+            const projectPath = (0, utils_1.toStringSafe)(updated.TX_PATH).trim();
+            if (!projectName || !projectPath) {
+                throw new Error('Nome e Caminho sao obrigatorios.');
+            }
+            const projectPayload = {
+                ID_PROJETO: 0,
+                IN_TIPO_PROJETO: '1',
+                NO_PROJETO: projectName,
+                DS_PROJETO: projectDescription,
+                TX_PATH: projectPath,
+            };
+            await saveProjectWithFreshSnapshot('createProject', projectPayload);
         });
     }), vscode.commands.registerCommand('aria.editEndpointCode', async (node) => {
         if (!state.dataset || !node) {

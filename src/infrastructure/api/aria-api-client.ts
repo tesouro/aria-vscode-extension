@@ -45,6 +45,10 @@ export class AriaApiClient {
     await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
   }
 
+  async saveProject(project: Record<string, unknown>): Promise<void> {
+    await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, { registros: [project] });
+  }
+
   async importarJsonEndpoint(projectId: number, endpointJson: unknown): Promise<{ status?: string; mensagem?: string }> {
     const query = { p_id_projeto: String(projectId) };
     const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/importar-json-endpoint', query, endpointJson);

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { AriaDataset, AriaProject, AriaEndpoint, ApiSettings, AriaLovs, EditMarker, PreviaPayload } from './core/types';
 import { ARIA_EDIT_SCHEME } from './core/constants';
-import { toStringSafe, toNumber, toErrorMessage, normalizeEndpointPath } from './core/utils';
+import { toStringSafe, toNumber, toErrorMessage, normalizeEndpointPath, normalizeTextForLookup } from './core/utils';
 import { resolveEndpointCodeExtension } from './domain/endpoints/code-type-resolver';
 import { buildEndpointFromExampleStructure, applyLovDisplayValues } from './domain/endpoints/endpoint-normalizer';
 import { validateEndpointPayload } from './domain/validation/endpoint-validator';
@@ -258,6 +258,56 @@ export function activate(context: vscode.ExtensionContext): void {
     tree.refresh();
   };
 
+  const saveDatasetWithFreshSnapshot = async (
+    source: string,
+    mutate: (draft: AriaDataset) => void | Promise<void>
+  ): Promise<void> => {
+    const client = state.getClient();
+    const freshDataset = await client.getProjectEndpointTree();
+    for (const project of freshDataset.registros) {
+      for (const ep of project.REST_CUSTOM ?? []) {
+        ep.SN_MODO_COMPATIBILIDADE = 'N';
+        if (ep.IN_TIPO_TRANSFORMACAO === '') { ep.IN_TIPO_TRANSFORMACAO = null; }
+      }
+    }
+
+    await mutate(freshDataset);
+
+    const payloadStr = JSON.stringify(freshDataset, null, 2);
+    const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
+    await fs.promises.writeFile(filePath, payloadStr, 'utf8');
+    state.lastPayloadPath = filePath;
+    output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
+
+    await client.saveDataset(freshDataset);
+    state.dataset = await client.getProjectEndpointTree();
+    tree.refresh();
+  };
+
+  const saveProjectWithFreshSnapshot = async (
+    source: string,
+    projectPayload: Record<string, unknown>
+  ): Promise<void> => {
+    const client = state.getClient();
+    const freshDataset = await client.getProjectEndpointTree();
+    const projectPath = toStringSafe(projectPayload.TX_PATH).trim().toLowerCase();
+    if (!projectPath) { throw new Error('Path do projeto e obrigatorio.'); }
+    if (freshDataset.registros.some((project) => toStringSafe(project.TX_PATH).trim().toLowerCase() === projectPath)) {
+      throw new Error(`Ja existe projeto com TX_PATH "${toStringSafe(projectPayload.TX_PATH).trim()}".`);
+    }
+
+    const wrappedPayload = { registros: [projectPayload] };
+    const payloadStr = JSON.stringify(wrappedPayload, null, 2);
+    const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
+    await fs.promises.writeFile(filePath, payloadStr, 'utf8');
+    state.lastPayloadPath = filePath;
+    output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
+
+    await client.saveProject(projectPayload);
+    state.dataset = await client.getProjectEndpointTree();
+    tree.refresh();
+  };
+
   const saveEditedDocument = async (document: vscode.TextDocument): Promise<void> => {
     const marker = state.editMap.get(document.uri.toString());
     if (!marker) { return; }
@@ -364,6 +414,27 @@ export function activate(context: vscode.ExtensionContext): void {
           if (idx < 0) { throw new Error('Projeto nao encontrado.'); }
           draft.registros[idx] = mergePreservingTypes(draft.registros[idx] as Record<string, unknown>, normalized) as AriaProject;
         });
+      });
+    }),
+
+    vscode.commands.registerCommand('aria.createProject', async () => {
+      if (!state.client) { vscode.window.showWarningMessage('Conecte primeiro.'); return; }
+      const formData = { NO_PROJETO: '', DS_PROJETO: '', TX_PATH: '' };
+      openFormWebview(context, 'Novo Projeto', formData, [], undefined, async (updated) => {
+        const projectName = toStringSafe(updated.NO_PROJETO).trim();
+        const projectDescription = toStringSafe(updated.DS_PROJETO).trim();
+        const projectPath = toStringSafe(updated.TX_PATH).trim();
+        if (!projectName || !projectPath) { throw new Error('Nome e Caminho sao obrigatorios.'); }
+
+        const projectPayload = {
+          ID_PROJETO: 0,
+          IN_TIPO_PROJETO: '1',
+          NO_PROJETO: projectName,
+          DS_PROJETO: projectDescription,
+          TX_PATH: projectPath,
+        };
+
+        await saveProjectWithFreshSnapshot('createProject', projectPayload);
       });
     }),
 

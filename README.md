@@ -83,6 +83,7 @@ No VS Code, configure as opções em `settings.json`:
 
 - **ARIA: Conectar na API** — Autentica e carrega os projetos.
 - **ARIA: Atualizar Árvore** — Atualiza a árvore de projetos/endpoints.
+- **ARIA: Novo Projeto** — Abre o formulário para criar um novo projeto.
 - **ARIA: Editar Projeto/Endpoint (JSON, Formulário, Código)** — Abre o editor correspondente.
 - **ARIA: Salvar Alterações via API** — Salva as alterações no backend.
 - **ARIA: Validar Código** — Valida o código do endpoint.

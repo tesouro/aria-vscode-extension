@@ -208,6 +208,20 @@ export function buildFormHtml(title: string, data: Record<string, unknown>, excl
   const isSqlEndpoint = data['ID_TIPO_CODIGO'] === 1 || data['ID_TIPO_CODIGO'] === '1';
   const bancoExternoJson = options?.lovs?.BANCO_EXTERNO?.length ? JSON.stringify(options.lovs.BANCO_EXTERNO) : undefined;
 
+  // Cabeçalho e descrição amigáveis
+  let friendlyHeader = '';
+  let friendlyDesc = '';
+  if (/^Novo Projeto/i.test(title)) {
+    friendlyHeader = 'Novo Projeto';
+    friendlyDesc = 'Preencha as informações do novo projeto abaixo.';
+  } else if (/^Novo Endpoint/i.test(title)) {
+    friendlyHeader = 'Novo Endpoint';
+    friendlyDesc = 'Preencha as informações do novo endpoint abaixo.';
+  } else {
+    friendlyHeader = escHtml(title);
+    friendlyDesc = '';
+  }
+
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -223,15 +237,15 @@ export function buildFormHtml(title: string, data: Record<string, unknown>, excl
   <form id="form">
     <section class="hero">
       <div class="hero-top">
-        <div><p class="eyebrow">Editor visual do JSON</p><h1>${escHtml(title)}</h1></div>
-        <p>${endpointMeta ? 'Campos e obrigatoriedade carregados dinamicamente do endpoint items-apex-endpoint.' : 'Os campos foram reorganizados em secoes para ficar mais proximo da experiencia de cadastro do APEX.'}</p>
+        <div><h1>${escHtml(friendlyHeader)}</h1></div>
+        <p>${escHtml(friendlyDesc)}</p>
       </div>
       <div class="summary-grid">${summaryItems}</div>
     </section>
     ${renderedSections}
     ${isSqlEndpoint ? `<section class="panel-card" id="preview-section" style="display:none"><div class="panel-head"><div><p class="eyebrow">Previa de Dados</p><h3>Resultado da Query SQL</h3></div><p>Executa a query atual contra o banco configurado e exibe os primeiros registros.</p></div><div class="preview-params" id="preview-params-area" style="display:none"><p style="margin:0 0 8px;font-size:.8em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">Parametros detectados</p><div class="fields-grid" id="preview-params-grid"></div></div><div class="preview-actions"><button type="button" id="previewRunBtn">Executar</button><span id="preview-status" style="font-size:.9em;color:var(--muted)"></span><span style="flex:1"></span><span id="preview-page-info" style="font-size:.88em;color:var(--muted)"></span><button type="button" class="btn-secondary" id="previewPrevBtn" style="display:none">&#9664; Anterior</button><button type="button" class="btn-secondary" id="previewNextBtn" style="display:none">Proxima &#9654;</button></div><div class="preview-table-wrap" id="preview-table-wrap"></div></section>` : ''}
     <div class="actions">
-      <div class="actions-copy">Revise os grupos abaixo e salve quando terminar.</div>
+      <div class="actions-copy">Revise as informações abaixo e salve quando terminar.</div>
       <div class="actions-main">
         <span class="status" id="status"></span>
         <button type="button" id="validateBtn">Validar Codigo</button>
