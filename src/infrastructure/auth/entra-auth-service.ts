@@ -62,7 +62,7 @@ export class EntraAuthService {
     this.onLoginStateChangedEmitter.fire(loggedIn);
   }
 
-  async ensureEntraLogin(): Promise<boolean> {
+  async ensureEntraLogin(createIfNone = true): Promise<boolean> {
     const entraSettings = getEntraSettings();
     this.requireLogin = entraSettings.requireLogin;
     if (!entraSettings.requireLogin) {
@@ -72,7 +72,7 @@ export class EntraAuthService {
 
     try {
       this.session = await vscode.authentication.getSession('microsoft', ['User.Read'], {
-        createIfNone: true,
+        createIfNone: createIfNone,
         forceNewSession: false,
       });
     } catch (error) {
@@ -96,6 +96,14 @@ export class EntraAuthService {
 
     await this.updateLoginState(true);
     return true;
+  }
+
+  async logout(): Promise<void> {
+    // Note: VS Code API may not expose a provider-specific logout in older versions.
+    // Here we clear the extension session state and update the login context.
+    this.session = undefined;
+    await this.updateLoginState(false);
+    vscode.window.showInformationMessage('Sessao ARIA encerrada localmente. Para remover a conta do VS Code, use a opcao de Contas na barra de status.');
   }
 
   createAccessTokenProvider(): AccessTokenProvider {

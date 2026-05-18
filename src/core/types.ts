@@ -28,6 +28,24 @@ export interface ValidateCodeResponse {
   [key: string]: unknown;
 }
 
+export interface PreviaPayload {
+  idBancoExterno: unknown;
+  idBancoEsquema: unknown;
+  query: string;
+  pagina: number;
+  tamanhoPagina: number;
+  parametros: string[];
+  valoresParametros: string[];
+}
+
+export interface PreviaResponse {
+  pageCount?: number;
+  columns?: string[];
+  count?: number;
+  registros?: Record<string, unknown>[];
+  status?: string;
+}
+
 export interface EndpointFormItem {
   ITEM_SEQUENCE: number;
   REGION_SEQUENCE: number;

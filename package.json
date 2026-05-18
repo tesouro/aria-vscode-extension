@@ -22,6 +22,13 @@
           "title": "ARIA",
           "icon": "resources/aria.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "ariaPreviewPanel",
+          "title": "ARIA Query Result",
+          "icon": "resources/aria.svg"
+        }
       ]
     },
     "views": {
@@ -30,6 +37,13 @@
           "id": "ariaProjectsView",
           "name": "Projetos ARIA",
           "icon": "resources/aria.svg"
+        }
+      ],
+      "ariaPreviewPanel": [
+        {
+          "id": "ariaQueryResultView",
+          "name": "ARIA Query Result",
+          "type": "webview"
         }
       ]
     },
@@ -83,6 +97,11 @@
         "command": "aria.validateActiveEditor",
         "title": "ARIA: Validar Codigo via API",
         "icon": "$(pass)"
+      },
+      {
+        "command": "aria.previewActiveEditorData",
+        "title": "ARIA: Previa de Dados SQL",
+        "icon": "$(table)"
       },
       {
         "command": "aria.openLastPayload",
@@ -160,6 +179,11 @@
           "command": "aria.validateActiveEditor",
           "when": "resourceFilename =~ /\\.aria\\.(sql|py)$/",
           "group": "navigation@2"
+        },
+        {
+          "command": "aria.previewActiveEditorData",
+          "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|sql)$/",
+          "group": "navigation@3"
         }
       ]
     },

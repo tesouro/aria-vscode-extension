@@ -1,7 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import type { ApiSettings, AccessTokenProvider, LogWriter, AriaDataset, AriaProject, AriaEndpoint,
-  AriaLovs, ValidateCodeResponse, EndpointFormItem, EndpointValidationItem } from '../../core/types';
+  AriaLovs, ValidateCodeResponse, EndpointFormItem, EndpointValidationItem, PreviaPayload, PreviaResponse } from '../../core/types';
 import { asRecord, asArray, toNumber, toStringSafe, summarizeForLog } from '../../core/utils';
 import { API_TIMEOUT_MS, GET_RETRY_DELAYS_MS } from '../../core/constants';
 import { normalizeLovsResponse } from '../../domain/lovs/lovs-normalizer';
@@ -92,6 +92,29 @@ export class AriaApiClient {
     if (payload.txCodigo != null) { body.p_tx_codigo = payload.txCodigo; }
     const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/valida-codigo', undefined, body);
     return (asRecord(response) as ValidateCodeResponse | undefined) ?? {};
+  }
+
+  async getPrevia(payload: PreviaPayload): Promise<PreviaResponse> {
+    const body: Record<string, unknown> = {
+      idBancoExterno: payload.idBancoExterno,
+      query: payload.query,
+      pagina: payload.pagina,
+      tamanhoPagina: payload.tamanhoPagina,
+      parametros: payload.parametros,
+      valoresParametros: payload.valoresParametros,
+    };
+    if (payload.idBancoEsquema != null && String(payload.idBancoEsquema).trim() !== '') {
+      body.idBancoEsquema = payload.idBancoEsquema;
+    }
+    const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/get-previa', undefined, body);
+    const root = asRecord(response) || {};
+    return {
+      pageCount: typeof root.pageCount === 'number' ? root.pageCount : undefined,
+      columns: Array.isArray(root.columns) ? root.columns as string[] : undefined,
+      count: typeof root.count === 'number' ? root.count : undefined,
+      registros: Array.isArray(root.registros) ? root.registros as Record<string, unknown>[] : undefined,
+      status: typeof root.status === 'string' ? root.status : undefined,
+    };
   }
 
   // ─── Private ──────────────────────────────────────────────────────────────

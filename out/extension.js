@@ -18,6 +18,8 @@ const state_store_1 = require("./infrastructure/stores/state-store");
 const tree_provider_1 = require("./vscode/tree/tree-provider");
 const virtual_fs_provider_1 = require("./vscode/editors/virtual-fs-provider");
 const form_webview_1 = require("./vscode/editors/form-webview");
+const preview_params_webview_1 = require("./vscode/editors/preview-params-webview");
+const preview_result_view_1 = require("./vscode/editors/preview-result-view");
 const tools_1 = require("./vscode/assistant/tools");
 const chat_participant_1 = require("./vscode/assistant/chat-participant");
 function getSettings() {
@@ -59,7 +61,21 @@ function activate(context) {
     const authService = new entra_auth_service_1.EntraAuthService();
     const virtualEditProvider = new virtual_fs_provider_1.InMemoryEditFileSystemProvider();
     const tree = new tree_provider_1.AriaTreeProvider(() => state.dataset);
-    context.subscriptions.push(output, vscode.workspace.registerFileSystemProvider(constants_1.ARIA_EDIT_SCHEME, virtualEditProvider, { isCaseSensitive: true }), vscode.window.registerTreeDataProvider('ariaProjectsView', tree));
+    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    const updateStatusBar = (loggedIn) => {
+        if (loggedIn) {
+            statusBarItem.text = '$(cloud-upload) ARIA: Conectado';
+            statusBarItem.command = 'aria.logout';
+            statusBarItem.tooltip = 'Desconectar ARIA';
+        }
+        else {
+            statusBarItem.text = '$(cloud) ARIA: Desconectado';
+            statusBarItem.command = 'aria.connect';
+            statusBarItem.tooltip = 'Conectar ARIA';
+        }
+        statusBarItem.show();
+    };
+    context.subscriptions.push(output, vscode.workspace.registerFileSystemProvider(constants_1.ARIA_EDIT_SCHEME, virtualEditProvider, { isCaseSensitive: true }), vscode.window.registerTreeDataProvider('ariaProjectsView', tree), statusBarItem);
     // ── Helpers ─────────────────────────────────────────────────────────────
     const createVirtualEditUri = (fileName) => vscode.Uri.from({ scheme: constants_1.ARIA_EDIT_SCHEME, path: `/${fileName}` });
     const openVirtualEditDocument = async (fileName, content, language) => {
@@ -84,6 +100,115 @@ function activate(context) {
             throw new Error((0, utils_1.toStringSafe)(result.mensagem) || 'Validacao remota do codigo falhou.');
         }
     };
+    const extractSqlParameters = (query) => {
+        const seen = new Set();
+        const params = [];
+        for (const match of query.matchAll(/:([a-zA-Z_][a-zA-Z0-9_]*)/g)) {
+            const name = String(match[1]).toUpperCase();
+            if (seen.has(name)) {
+                continue;
+            }
+            seen.add(name);
+            params.push(name);
+        }
+        return params;
+    };
+    const buildPreviewPayload = (endpoint) => {
+        const query = (0, utils_1.toStringSafe)(endpoint.TX_CODIGO).trim();
+        if (!query) {
+            throw new Error('A query SQL esta vazia.');
+        }
+        const idBancoExterno = endpoint.ID_BANCO_EXTERNO;
+        const idBancoEsquema = endpoint.ID_BANCO_ESQUEMA == null || String(endpoint.ID_BANCO_ESQUEMA).trim() === ''
+            ? undefined
+            : endpoint.ID_BANCO_ESQUEMA;
+        if (idBancoExterno == null || String(idBancoExterno).trim() === '') {
+            throw new Error('ID_BANCO_EXTERNO e obrigatorio para executar a previa.');
+        }
+        return {
+            idBancoExterno,
+            idBancoEsquema,
+            query,
+            pagina: 1,
+            tamanhoPagina: 20,
+            parametros: extractSqlParameters(query),
+            valoresParametros: [],
+        };
+    };
+    const resolvePreviewContextForActiveEditor = async (editor) => {
+        const marker = state.editMap.get(editor.document.uri.toString());
+        if (!marker || (marker.type !== 'endpointCode' && marker.type !== 'endpointJson')) {
+            throw new Error('Previa disponivel apenas para editores de endpoint em codigo ou JSON.');
+        }
+        const project = await state.getProjectDetails(marker.projectId);
+        const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        let previewSource;
+        if (marker.type === 'endpointCode') {
+            previewSource = { ...endpoint, TX_CODIGO: editor.document.getText() };
+        }
+        else {
+            let parsed;
+            try {
+                parsed = JSON.parse(editor.document.getText());
+            }
+            catch (error) {
+                throw new Error(`JSON invalido no editor: ${(0, utils_1.toErrorMessage)(error)}`);
+            }
+            previewSource = { ...endpoint, ...parsed, ID_REST_CUSTOM: endpoint.ID_REST_CUSTOM };
+        }
+        if ((0, utils_1.toNumber)(previewSource.ID_TIPO_CODIGO) !== 1) {
+            throw new Error('Previa de dados disponivel apenas para endpoints SQL.');
+        }
+        return {
+            title: `Previa SQL: ${(0, utils_1.toStringSafe)(endpoint.NO_REST_CUSTOM) || `Endpoint ${marker.id}`}`,
+            source: previewSource,
+            payload: buildPreviewPayload(previewSource),
+        };
+    };
+    let activePreviewSession;
+    let previewResultView;
+    const ensurePreviewPanelVisible = async () => {
+        await vscode.commands.executeCommand('ariaQueryResultView.focus');
+    };
+    const runPreviewExecution = async (payload) => {
+        if (!state.client) {
+            throw new Error('Sem conexao ativa com a API.');
+        }
+        if (!activePreviewSession) {
+            throw new Error('Sessao de previa nao inicializada.');
+        }
+        activePreviewSession.payload = payload;
+        previewResultView.setSession(activePreviewSession.title, payload);
+        previewResultView.setLoading();
+        await ensurePreviewPanelVisible();
+        try {
+            if (activePreviewSession.source) {
+                await validateEndpointCodeBeforeSave({ ...activePreviewSession.source, TX_CODIGO: payload.query });
+            }
+            const result = await state.getClient().getPrevia(payload);
+            previewResultView.setResult(result);
+        }
+        catch (error) {
+            previewResultView.setError((0, utils_1.toErrorMessage)(error));
+            throw error;
+        }
+    };
+    previewResultView = new preview_result_view_1.SqlPreviewResultViewProvider(async (action) => {
+        if (!activePreviewSession) {
+            return;
+        }
+        const current = activePreviewSession.payload;
+        const nextPayload = action === 'prev'
+            ? { ...current, pagina: Math.max((Number(current.pagina) || 1) - 1, 1) }
+            : action === 'next'
+                ? { ...current, pagina: (Number(current.pagina) || 1) + 1 }
+                : current;
+        await runPreviewExecution(nextPayload);
+    });
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider('ariaQueryResultView', previewResultView, { webviewOptions: { retainContextWhenHidden: true } }));
     const saveWithFreshDataset = async (source, projectId, mutate) => {
         const client = state.getClient();
         const freshDataset = await client.getDatasetByProjectId(projectId);
@@ -186,6 +311,11 @@ function activate(context) {
     // ── Login state ─────────────────────────────────────────────────────────
     const entraSettings = (0, entra_auth_service_1.getEntraSettings)();
     void authService.updateLoginState(!entraSettings.requireLogin);
+    // check existing session without prompting: if user already logged in, set state
+    void authService.ensureEntraLogin(false);
+    // update status bar based on auth state and listen to changes
+    updateStatusBar(authService.getIsLoggedIn());
+    context.subscriptions.push(authService.onLoginStateChanged(updateStatusBar));
     // ── Commands ────────────────────────────────────────────────────────────
     context.subscriptions.push(vscode.commands.registerCommand('aria.connect', async () => {
         if (!(await authService.ensureEntraLogin())) {
@@ -203,6 +333,18 @@ function activate(context) {
         }
         catch (error) {
             vscode.window.showErrorMessage(`Erro ao conectar: ${(0, utils_1.toErrorMessage)(error)}`);
+        }
+    }), vscode.commands.registerCommand('aria.logout', async () => {
+        try {
+            await authService.logout();
+            await state.client?.close();
+            state.client = undefined;
+            state.dataset = undefined;
+            tree.refresh();
+            vscode.window.showInformationMessage('Desconectado.');
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Falha ao deslogar: ${(0, utils_1.toErrorMessage)(error)}`);
         }
     }), vscode.commands.registerCommand('aria.refreshTree', async () => {
         if (!state.client) {
@@ -292,7 +434,17 @@ function activate(context) {
                 }
                 throw new Error('Endpoint nao encontrado.');
             });
-        });
+        }, async (updated) => {
+            const normalized = (0, endpoint_normalizer_1.applyLovDisplayValues)(updated, lovs);
+            const merged = mergePreservingTypes(endpoint, normalized);
+            return state.getClient().validateCode({
+                idTipoCodigo: merged.ID_TIPO_CODIGO,
+                idBancoExterno: merged.ID_BANCO_EXTERNO,
+                snModoCompatibilidade: merged.SN_MODO_COMPATIBILIDADE,
+                idBancoEsquema: merged.ID_BANCO_ESQUEMA,
+                txCodigo: (0, utils_1.toStringSafe)(merged.TX_CODIGO),
+            });
+        }, async (payload) => state.getClient().getPrevia(payload));
     }), vscode.commands.registerCommand('aria.createEndpoint', async (node) => {
         if (!state.dataset) {
             vscode.window.showWarningMessage('Conecte primeiro.');
@@ -388,6 +540,29 @@ function activate(context) {
         }
         catch (error) {
             vscode.window.showErrorMessage(`Falha: ${(0, utils_1.toErrorMessage)(error)}`);
+        }
+    }), vscode.commands.registerCommand('aria.previewActiveEditorData', async () => {
+        if (!state.client || !state.dataset) {
+            vscode.window.showWarningMessage('Conecte primeiro.');
+            return;
+        }
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            return;
+        }
+        try {
+            const previewContext = await resolvePreviewContextForActiveEditor(editor);
+            activePreviewSession = { title: previewContext.title, payload: previewContext.payload, source: previewContext.source };
+            if (previewContext.payload.parametros.length > 0) {
+                (0, preview_params_webview_1.openPreviewParamsWebview)(previewContext.title, previewContext.payload, async (payload) => {
+                    activePreviewSession = { title: previewContext.title, payload, source: previewContext.source };
+                    await runPreviewExecution(payload);
+                });
+            }
+            await runPreviewExecution(previewContext.payload);
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Falha ao abrir previa: ${(0, utils_1.toErrorMessage)(error)}`);
         }
     }), vscode.commands.registerCommand('aria.openLastPayload', async () => {
         if (!state.lastPayloadPath) {
