@@ -6,6 +6,8 @@ const vscode = require("vscode");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const yaml = require("js-yaml");
+const toml = require("@iarna/toml");
 const constants_1 = require("./core/constants");
 const utils_1 = require("./core/utils");
 const code_type_resolver_1 = require("./domain/endpoints/code-type-resolver");
@@ -46,6 +48,146 @@ function mergePreservingTypes(original, updates) {
 function isValidateCodeSuccess(status) {
     const s = (0, utils_1.toStringSafe)(status).toLowerCase().trim();
     return s === 'sucesso' || s === 'ok' || s === 'success';
+}
+function toYamlText(input) {
+    const normalized = normalizeMultilineStrings(input);
+    if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) {
+        const obj = normalized;
+        // Handle project objects with nested REST_CUSTOM endpoints
+        if (Object.prototype.hasOwnProperty.call(obj, 'REST_CUSTOM') && Array.isArray(obj.REST_CUSTOM)) {
+            const withoutRest = { ...obj };
+            const rest = withoutRest.REST_CUSTOM || [];
+            delete withoutRest.REST_CUSTOM;
+            const head = yaml.dump(withoutRest, { noRefs: true, sortKeys: false, lineWidth: -1 }).trimEnd();
+            const entries = [];
+            for (const epRaw of rest) {
+                const ep = normalizeMultilineStrings(epRaw);
+                const tx = ep && typeof ep === 'object' && Object.prototype.hasOwnProperty.call(ep, 'TX_CODIGO') ? (0, utils_1.toStringSafe)(ep['TX_CODIGO']) : undefined;
+                const epWithout = { ...ep };
+                delete epWithout.TX_CODIGO;
+                const dumpedEp = yaml.dump(epWithout, { noRefs: true, sortKeys: false, lineWidth: -1 }).trim();
+                const baseLines = dumpedEp.length ? dumpedEp.split('\n') : [];
+                const prefixedLines = baseLines.map((l, i) => i === 0 ? `  - ${l}` : `    ${l}`);
+                if (tx !== undefined) {
+                    const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+                    const txLines = normalizedTx.split(/\r\n|\r|\n/);
+                    prefixedLines.push('    TX_CODIGO: |-');
+                    for (const l of txLines) {
+                        prefixedLines.push(`      ${l}`);
+                    }
+                }
+                entries.push(prefixedLines.join('\n'));
+            }
+            const restBlock = `REST_CUSTOM:\n${entries.join('\n')}`;
+            const prefix = head && String(head).trim().length > 0 ? `${head}\n` : '';
+            return `${prefix}${restBlock}\n`;
+        }
+        if (Object.prototype.hasOwnProperty.call(obj, 'TX_CODIGO')) {
+            const tx = (0, utils_1.toStringSafe)(obj['TX_CODIGO']);
+            const without = { ...obj };
+            delete without.TX_CODIGO;
+            const dumped = yaml.dump(without, { noRefs: true, sortKeys: false, lineWidth: -1 });
+            // Build block literal for TX_CODIGO preserving CRLF and LF sequences
+            const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+            const lines = normalizedTx.split(/\r\n|\r|\n/);
+            const indented = lines.map((l) => `  ${l}`).join('\n');
+            const block = `TX_CODIGO: |-\n${indented}\n`;
+            const prefix = (dumped && String(dumped).trim().length > 0) ? `${dumped.trimEnd()}\n` : '';
+            return `${prefix}${block}`;
+        }
+    }
+    return yaml.dump(normalized, { noRefs: true, sortKeys: false, lineWidth: -1 });
+}
+function toTomlText(input) {
+    const normalized = normalizeMultilineStrings(input);
+    if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) {
+        const obj = normalized;
+        // Handle project objects with REST_CUSTOM array -> TOML tables
+        if (Object.prototype.hasOwnProperty.call(obj, 'REST_CUSTOM') && Array.isArray(obj.REST_CUSTOM)) {
+            const withoutRest = { ...obj };
+            const rest = withoutRest.REST_CUSTOM || [];
+            delete withoutRest.REST_CUSTOM;
+            const head = toml.stringify(withoutRest).trimEnd();
+            const tables = [];
+            for (const epRaw of rest) {
+                const ep = normalizeMultilineStrings(epRaw);
+                const tx = ep && typeof ep === 'object' && Object.prototype.hasOwnProperty.call(ep, 'TX_CODIGO') ? (0, utils_1.toStringSafe)(ep['TX_CODIGO']) : undefined;
+                const epWithout = { ...ep };
+                delete epWithout.TX_CODIGO;
+                const dumpedEp = toml.stringify(epWithout).trim();
+                const prefix = `[[REST_CUSTOM]]\n`;
+                if (tx !== undefined) {
+                    const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+                    const escaped = normalizedTx.replace(/"""/g, '\\"\\"\\"');
+                    tables.push(`${prefix}${dumpedEp}\nTX_CODIGO = """${escaped}"""`);
+                }
+                else {
+                    tables.push(`${prefix}${dumpedEp}`);
+                }
+            }
+            const prefixHead = head && String(head).trim().length > 0 ? `${head}\n\n` : '';
+            return `${prefixHead}${tables.join('\n\n')}\n`;
+        }
+        if (Object.prototype.hasOwnProperty.call(obj, 'TX_CODIGO')) {
+            const tx = (0, utils_1.toStringSafe)(obj['TX_CODIGO']);
+            const without = { ...obj };
+            delete without.TX_CODIGO;
+            const dumped = toml.stringify(without);
+            // Preserve CRLF and LF; escape triple quotes inside the content
+            const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+            const escaped = normalizedTx.replace(/"""/g, '\\"\\"\\"');
+            const block = `TX_CODIGO = """${escaped}"""\n`;
+            const prefix = (dumped && String(dumped).trim().length > 0) ? `${dumped.trimEnd()}\n` : '';
+            return `${prefix}${block}`;
+        }
+    }
+    return toml.stringify(normalized);
+}
+function normalizeMultilineStrings(value) {
+    if (value == null) {
+        return value;
+    }
+    if (typeof value === 'string') {
+        // Convert literal backslash-n sequences into real newlines for readability
+        return value.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n');
+    }
+    if (Array.isArray(value)) {
+        return value.map((v) => normalizeMultilineStrings(v));
+    }
+    if (typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) {
+            out[k] = normalizeMultilineStrings(v);
+        }
+        return out;
+    }
+    return value;
+}
+function parseYamlObject(text, label) {
+    let parsed;
+    try {
+        parsed = yaml.load(text);
+    }
+    catch (error) {
+        throw new Error(`YAML invalido em ${label}: ${(0, utils_1.toErrorMessage)(error)}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`YAML invalido em ${label}: esperado um objeto no nivel raiz.`);
+    }
+    return parsed;
+}
+function parseTomlObject(text, label) {
+    let parsed;
+    try {
+        parsed = toml.parse(text);
+    }
+    catch (error) {
+        throw new Error(`TOML invalido em ${label}: ${(0, utils_1.toErrorMessage)(error)}`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`TOML invalido em ${label}: esperado um objeto no nivel raiz.`);
+    }
+    return parsed;
 }
 async function ensureEditFilePath(fileName) {
     const editDir = path.join(os.tmpdir(), 'aria-edit');
@@ -161,8 +303,8 @@ function activate(context) {
     };
     const resolvePreviewContextForActiveEditor = async (editor) => {
         const marker = state.editMap.get(editor.document.uri.toString());
-        if (!marker || (marker.type !== 'endpointCode' && marker.type !== 'endpointJson')) {
-            throw new Error('Previa disponivel apenas para editores de endpoint em codigo ou JSON.');
+        if (!marker || (marker.type !== 'endpointCode' && marker.type !== 'endpointJson' && marker.type !== 'endpointYaml' && marker.type !== 'endpointToml')) {
+            throw new Error('Previa disponivel apenas para editores de endpoint em codigo, JSON, YAML ou TOML.');
         }
         const project = await state.getProjectDetails(marker.projectId);
         const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
@@ -175,11 +317,19 @@ function activate(context) {
         }
         else {
             let parsed;
-            try {
-                parsed = JSON.parse(editor.document.getText());
+            if (marker.type === 'endpointJson') {
+                try {
+                    parsed = JSON.parse(editor.document.getText());
+                }
+                catch (error) {
+                    throw new Error(`JSON invalido no editor: ${(0, utils_1.toErrorMessage)(error)}`);
+                }
             }
-            catch (error) {
-                throw new Error(`JSON invalido no editor: ${(0, utils_1.toErrorMessage)(error)}`);
+            else if (marker.type === 'endpointYaml') {
+                parsed = parseYamlObject(editor.document.getText(), 'editor de endpoint');
+            }
+            else {
+                parsed = parseTomlObject(editor.document.getText(), 'editor de endpoint');
             }
             previewSource = { ...endpoint, ...parsed, ID_REST_CUSTOM: endpoint.ID_REST_CUSTOM };
         }
@@ -194,8 +344,8 @@ function activate(context) {
     };
     const resolveMetadataSelectionForActiveEditor = async (editor) => {
         const marker = state.editMap.get(editor.document.uri.toString());
-        if (!marker || (marker.type !== 'endpointCode' && marker.type !== 'endpointJson')) {
-            throw new Error('Metadados disponiveis apenas para editores de endpoint em codigo ou JSON.');
+        if (!marker || (marker.type !== 'endpointCode' && marker.type !== 'endpointJson' && marker.type !== 'endpointYaml' && marker.type !== 'endpointToml')) {
+            throw new Error('Metadados disponiveis apenas para editores de endpoint em codigo, JSON, YAML ou TOML.');
         }
         const project = await state.getProjectDetails(marker.projectId);
         const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
@@ -211,6 +361,14 @@ function activate(context) {
             catch (error) {
                 throw new Error(`JSON invalido no editor: ${(0, utils_1.toErrorMessage)(error)}`);
             }
+        }
+        else if (marker.type === 'endpointYaml') {
+            const parsed = parseYamlObject(editor.document.getText(), 'editor de endpoint');
+            sourceEndpoint = { ...endpoint, ...parsed, ID_REST_CUSTOM: endpoint.ID_REST_CUSTOM };
+        }
+        else if (marker.type === 'endpointToml') {
+            const parsed = parseTomlObject(editor.document.getText(), 'editor de endpoint');
+            sourceEndpoint = { ...endpoint, ...parsed, ID_REST_CUSTOM: endpoint.ID_REST_CUSTOM };
         }
         const idBancoExterno = (0, utils_1.toNumber)(sourceEndpoint.ID_BANCO_EXTERNO);
         if (idBancoExterno <= 0) {
@@ -287,7 +445,7 @@ function activate(context) {
                 return undefined;
             }
             const fileName = path.basename(document.uri.path).toLowerCase();
-            if (!/^endpoint-.*\.aria\.(json|sql|py)$/.test(fileName)) {
+            if (!/^endpoint-.*\.aria\.(json|yaml|yml|toml|sql|py)$/.test(fileName)) {
                 return undefined;
             }
             const dropped = dataTransfer.get(metadata_tree_provider_1.ARIA_METADATA_TABLE_MIME);
@@ -303,7 +461,7 @@ function activate(context) {
             }
             let endpointCodeType = 'SQL';
             const marker = state.editMap.get(document.uri.toString());
-            if (marker && (marker.type === 'endpointCode' || marker.type === 'endpointJson')) {
+            if (marker && (marker.type === 'endpointCode' || marker.type === 'endpointJson' || marker.type === 'endpointYaml' || marker.type === 'endpointToml')) {
                 try {
                     const project = await state.getProjectDetails(marker.projectId);
                     const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
@@ -465,7 +623,7 @@ function activate(context) {
         }
         await mutate(freshDataset);
         // Validate code for relevant endpoints
-        if (source.startsWith('endpointCode:') || source.startsWith('endpointJson:') || source.startsWith('endpointForm:')) {
+        if (source.startsWith('endpointCode:') || source.startsWith('endpointJson:') || source.startsWith('endpointYaml:') || source.startsWith('endpointToml:') || source.startsWith('endpointForm:')) {
             const endpointId = Number(source.split(':')[1]);
             for (const ep of draftProject.REST_CUSTOM.filter((e) => e.ID_REST_CUSTOM === endpointId)) {
                 await validateEndpointCodeBeforeSave(ep);
@@ -477,7 +635,7 @@ function activate(context) {
                 await validateEndpointCodeBeforeSave(ep);
             }
         }
-        else if (source.startsWith('projectJson:')) {
+        else if (source.startsWith('projectJson:') || source.startsWith('projectYaml:') || source.startsWith('projectToml:')) {
             for (const ep of draftProject.REST_CUSTOM) {
                 await validateEndpointCodeBeforeSave(ep);
             }
@@ -560,6 +718,46 @@ function activate(context) {
                         }
                         draft.registros[idx] = { ...draft.registros[idx], ...parsed, ID_PROJETO: marker.id, REST_CUSTOM: parsed.REST_CUSTOM || draft.registros[idx].REST_CUSTOM };
                         return;
+                    }
+                    if (marker.type === 'projectYaml') {
+                        const parsed = parseYamlObject(text, 'editor de projeto');
+                        const idx = draft.registros.findIndex((p) => p.ID_PROJETO === marker.id);
+                        if (idx < 0) {
+                            throw new Error('Projeto nao encontrado.');
+                        }
+                        draft.registros[idx] = { ...draft.registros[idx], ...parsed, ID_PROJETO: marker.id, REST_CUSTOM: parsed.REST_CUSTOM || draft.registros[idx].REST_CUSTOM };
+                        return;
+                    }
+                    if (marker.type === 'projectToml') {
+                        const parsed = parseTomlObject(text, 'editor de projeto');
+                        const idx = draft.registros.findIndex((p) => p.ID_PROJETO === marker.id);
+                        if (idx < 0) {
+                            throw new Error('Projeto nao encontrado.');
+                        }
+                        draft.registros[idx] = { ...draft.registros[idx], ...parsed, ID_PROJETO: marker.id, REST_CUSTOM: parsed.REST_CUSTOM || draft.registros[idx].REST_CUSTOM };
+                        return;
+                    }
+                    if (marker.type === 'endpointYaml') {
+                        const parsed = parseYamlObject(text, 'editor de endpoint');
+                        for (const project of draft.registros) {
+                            const idx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === marker.id);
+                            if (idx >= 0) {
+                                project.REST_CUSTOM[idx] = { ...project.REST_CUSTOM[idx], ...parsed, ID_REST_CUSTOM: marker.id };
+                                return;
+                            }
+                        }
+                        throw new Error('Endpoint nao encontrado.');
+                    }
+                    if (marker.type === 'endpointToml') {
+                        const parsed = parseTomlObject(text, 'editor de endpoint');
+                        for (const project of draft.registros) {
+                            const idx = project.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === marker.id);
+                            if (idx >= 0) {
+                                project.REST_CUSTOM[idx] = { ...project.REST_CUSTOM[idx], ...parsed, ID_REST_CUSTOM: marker.id };
+                                return;
+                            }
+                        }
+                        throw new Error('Endpoint nao encontrado.');
                     }
                     const parsed = JSON.parse(text);
                     for (const project of draft.registros) {
@@ -710,6 +908,20 @@ function activate(context) {
         const project = await state.getProjectDetails(node.project.ID_PROJETO);
         const doc = await openEditableDocument(`project-${node.project.ID_PROJETO}.aria.json`, JSON.stringify(project, null, 2), 'json');
         state.editMap.set(doc.uri.toString(), { type: 'projectJson', id: node.project.ID_PROJETO, projectId: node.project.ID_PROJETO });
+    }), vscode.commands.registerCommand('aria.editProjectYaml', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const doc = await openEditableDocument(`project-${node.project.ID_PROJETO}.aria.yaml`, toYamlText(project), 'yaml');
+        state.editMap.set(doc.uri.toString(), { type: 'projectYaml', id: node.project.ID_PROJETO, projectId: node.project.ID_PROJETO });
+    }), vscode.commands.registerCommand('aria.editProjectToml', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const doc = await openEditableDocument(`project-${node.project.ID_PROJETO}.aria.toml`, toTomlText(project), 'toml');
+        state.editMap.set(doc.uri.toString(), { type: 'projectToml', id: node.project.ID_PROJETO, projectId: node.project.ID_PROJETO });
     }), vscode.commands.registerCommand('aria.editProjectForm', async (node) => {
         if (!state.dataset || !node) {
             return;
@@ -772,6 +984,28 @@ function activate(context) {
         }
         const doc = await openEditableDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.json`, JSON.stringify(endpoint, null, 2), 'json');
         state.editMap.set(doc.uri.toString(), { type: 'endpointJson', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
+    }), vscode.commands.registerCommand('aria.editEndpointYaml', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        const doc = await openEditableDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.yaml`, toYamlText(endpoint), 'yaml');
+        state.editMap.set(doc.uri.toString(), { type: 'endpointYaml', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
+    }), vscode.commands.registerCommand('aria.editEndpointToml', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        const doc = await openEditableDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.toml`, toTomlText(endpoint), 'toml');
+        state.editMap.set(doc.uri.toString(), { type: 'endpointToml', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
     }), vscode.commands.registerCommand('aria.editEndpointForm', async (node) => {
         if (!state.dataset || !node) {
             return;

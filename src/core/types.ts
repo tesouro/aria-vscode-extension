@@ -154,7 +154,11 @@ export type CodeTypeLabel = 'SQL' | 'PLSQL' | 'PYTHON';
 
 export type EditMarker =
   | { type: 'projectJson'; id: number; projectId: number }
+  | { type: 'projectYaml'; id: number; projectId: number }
+  | { type: 'projectToml'; id: number; projectId: number }
   | { type: 'endpointJson'; id: number; projectId: number }
+  | { type: 'endpointYaml'; id: number; projectId: number }
+  | { type: 'endpointToml'; id: number; projectId: number }
   | { type: 'endpointCode'; id: number; projectId: number };
 
 // ─── Draft Types ────────────────────────────────────────────────────────────

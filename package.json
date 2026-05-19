@@ -48,6 +48,7 @@
         {
           "id": "ariaQueryResultView",
           "name": "ARIA Query Result",
+          "icon": "resources/aria.svg",
           "type": "webview"
         }
       ]
@@ -117,11 +118,23 @@
       },
       {
         "command": "aria.editProjectJson",
-        "title": "Editar JSON"
+        "title": "Editar JSON",
+        "icon": "$(json)"
+      },
+      {
+        "command": "aria.editProjectYaml",
+        "title": "Editar YAML",
+        "icon": "$(json)"
+      },
+      {
+        "command": "aria.editProjectToml",
+        "title": "Editar TOML",
+        "icon": "$(json)"
       },
       {
         "command": "aria.editProjectForm",
-        "title": "Editar em Formulario"
+        "title": "Editar em Formulario",
+        "icon": "$(list-tree)"
       },
       {
         "command": "aria.editEndpointCode",
@@ -131,6 +144,16 @@
       {
         "command": "aria.editEndpointJson",
         "title": "Editar JSON",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "aria.editEndpointYaml",
+        "title": "Editar YAML",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "aria.editEndpointToml",
+        "title": "Editar TOML",
         "icon": "$(file-code)"
       },
       {
@@ -234,14 +257,24 @@
           "group": "aria@2"
         },
         {
-          "command": "aria.editEndpointForm",
+          "command": "aria.editEndpointYaml",
           "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
           "group": "aria@3"
         },
         {
-          "command": "aria.openEndpointMetadata",
+          "command": "aria.editEndpointToml",
           "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
           "group": "aria@4"
+        },
+        {
+          "command": "aria.editEndpointForm",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@5"
+        },
+        {
+          "command": "aria.openEndpointMetadata",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@6"
         },
         {
           "command": "aria.createEndpoint",
@@ -259,15 +292,25 @@
           "group": "aria@2"
         },
         {
-          "command": "aria.editProjectForm",
+          "command": "aria.editProjectYaml",
           "when": "view == ariaProjectsView && viewItem == ariaProject",
           "group": "aria@3"
+        },
+        {
+          "command": "aria.editProjectToml",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@4"
+        },
+        {
+          "command": "aria.editProjectForm",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@5"
         }
       ],
       "editor/title": [
         {
           "command": "aria.saveActiveEditor",
-          "when": "resourceFilename =~ /\\.aria\\.(json|sql|py)$/",
+          "when": "resourceFilename =~ /\\.aria\\.(json|yaml|yml|toml|sql|py)$/",
           "group": "navigation"
         },
         {
@@ -277,12 +320,12 @@
         },
         {
           "command": "aria.previewActiveEditorData",
-          "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|sql)$/",
+          "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|yaml|yml|toml|sql)$/",
           "group": "navigation@3"
         },
         {
           "command": "aria.openEndpointMetadata",
-          "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|sql|py)$/",
+          "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|yaml|yml|toml|sql|py)$/",
           "group": "navigation@4"
         }
       ]
@@ -590,9 +633,13 @@
     "test": "tsc -p tsconfig.test.json && node --test out-test/tests/*.test.js"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.14.2",
     "@types/vscode": "^1.90.0",
     "typescript": "^5.4.5"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "js-yaml": "^4.1.1"
+  }
 }
