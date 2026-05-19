@@ -88,7 +88,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     output,
-    vscode.workspace.registerFileSystemProvider(ARIA_EDIT_SCHEME, virtualEditProvider, { isCaseSensitive: true }),
+    vscode.workspace.registerFileSystemProvider(ARIA_EDIT_SCHEME, virtualEditProvider, { isCaseSensitive: true, isReadonly: false }),
     vscode.window.registerTreeDataProvider('ariaProjectsView', tree),
     metadataTreeView,
     statusBarItem
@@ -99,6 +99,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const createVirtualEditUri = (fileName: string): vscode.Uri =>
     vscode.Uri.from({ scheme: ARIA_EDIT_SCHEME, path: `/${fileName}` });
 
+  const shouldUsePhysicalTempFiles = (): boolean => (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
+
   const openVirtualEditDocument = async (fileName: string, content: string, language?: string): Promise<vscode.TextDocument> => {
     const uri = createVirtualEditUri(fileName);
     virtualEditProvider.setContent(uri, content);
@@ -107,6 +109,19 @@ export function activate(context: vscode.ExtensionContext): void {
     await vscode.window.showTextDocument(doc, { preview: false });
     return doc;
   };
+
+  const openPhysicalTempEditDocument = async (fileName: string, content: string, language?: string): Promise<vscode.TextDocument> => {
+    const filePath = await ensureEditFilePath(fileName);
+    await fs.promises.writeFile(filePath, content, 'utf8');
+    const uri = vscode.Uri.file(filePath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    if (language && doc.languageId !== language) { await vscode.languages.setTextDocumentLanguage(doc, language); }
+    await vscode.window.showTextDocument(doc, { preview: false });
+    return doc;
+  };
+
+  const openEditableDocument = async (fileName: string, content: string, language?: string): Promise<vscode.TextDocument> =>
+    openPhysicalTempEditDocument(fileName, content, language);
 
   const validateEndpointCodeBeforeSave = async (endpoint: Record<string, unknown>): Promise<void> => {
     const result = await state.getClient().validateCode({
@@ -283,9 +298,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.languages.registerDocumentDropEditProvider(
-      [{ scheme: ARIA_EDIT_SCHEME }],
+      [{ scheme: ARIA_EDIT_SCHEME }, { scheme: 'file' }],
       {
         provideDocumentDropEdits: async (document, _position, dataTransfer) => {
+          if (!state.editMap.has(document.uri.toString())) { return undefined; }
           const fileName = path.basename(document.uri.path).toLowerCase();
           if (!/^endpoint-.*\.aria\.(json|sql|py)$/.test(fileName)) { return undefined; }
 
@@ -591,7 +607,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // ── Event: save virtual document ────────────────────────────────────────
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async (document) => {
-      if (document.uri.scheme !== ARIA_EDIT_SCHEME || !state.editMap.has(document.uri.toString())) { return; }
+      if (!state.editMap.has(document.uri.toString())) { return; }
       try { await saveEditedDocument(document); }
       catch (error) { vscode.window.showErrorMessage(`Falha ao salvar: ${toErrorMessage(error)}`); }
     })
@@ -697,7 +713,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('aria.editProjectJson', async (node?: ProjectNode) => {
       if (!state.dataset || !node) { return; }
       const project = await state.getProjectDetails(node.project.ID_PROJETO);
-      const doc = await openVirtualEditDocument(`project-${node.project.ID_PROJETO}.aria.json`, JSON.stringify(project, null, 2), 'json');
+      const doc = await openEditableDocument(`project-${node.project.ID_PROJETO}.aria.json`, JSON.stringify(project, null, 2), 'json');
       state.editMap.set(doc.uri.toString(), { type: 'projectJson', id: node.project.ID_PROJETO, projectId: node.project.ID_PROJETO });
     }),
 
@@ -743,7 +759,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!endpoint) { throw new Error('Endpoint nao encontrado.'); }
       const ext = resolveEndpointCodeExtension(endpoint);
       const lang = ext === 'py' ? 'python' : 'sql';
-      const doc = await openVirtualEditDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.${ext}`, endpoint.TX_CODIGO ?? '', lang);
+      const doc = await openEditableDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.${ext}`, endpoint.TX_CODIGO ?? '', lang);
       state.editMap.set(doc.uri.toString(), { type: 'endpointCode', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
     }),
 
@@ -752,7 +768,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const project = await state.getProjectDetails(node.project.ID_PROJETO);
       const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
       if (!endpoint) { throw new Error('Endpoint nao encontrado.'); }
-      const doc = await openVirtualEditDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.json`, JSON.stringify(endpoint, null, 2), 'json');
+      const doc = await openEditableDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.json`, JSON.stringify(endpoint, null, 2), 'json');
       state.editMap.set(doc.uri.toString(), { type: 'endpointJson', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });
     }),
 
