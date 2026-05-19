@@ -81,6 +81,16 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "aria.searchTree",
+        "title": "ARIA: Buscar na Arvore de Projetos",
+        "icon": "$(search)"
+      },
+      {
+        "command": "aria.clearTreeSearch",
+        "title": "ARIA: Limpar Busca da Arvore de Projetos",
+        "icon": "$(clear-all)"
+      },
+      {
         "command": "aria.loadMetadataExplorer",
         "title": "ARIA: Carregar Metadados",
         "icon": "$(database)"
@@ -89,6 +99,16 @@
         "command": "aria.refreshMetadataExplorer",
         "title": "ARIA: Atualizar Metadados",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "aria.searchMetadataExplorer",
+        "title": "ARIA: Buscar Metadados",
+        "icon": "$(search)"
+      },
+      {
+        "command": "aria.clearMetadataSearch",
+        "title": "ARIA: Limpar Busca de Metadados",
+        "icon": "$(clear-all)"
       },
       {
         "command": "aria.createProject",
@@ -167,6 +187,16 @@
           "group": "navigation@3"
         },
         {
+          "command": "aria.searchTree",
+          "when": "view == ariaProjectsView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "aria.clearTreeSearch",
+          "when": "view == ariaProjectsView",
+          "group": "navigation@5"
+        },
+        {
           "command": "aria.loadMetadataExplorer",
           "when": "view == ariaMetadataView",
           "group": "navigation@1"
@@ -175,6 +205,16 @@
           "command": "aria.refreshMetadataExplorer",
           "when": "view == ariaMetadataView",
           "group": "navigation@2"
+        },
+        {
+          "command": "aria.searchMetadataExplorer",
+          "when": "view == ariaMetadataView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "aria.clearMetadataSearch",
+          "when": "view == ariaMetadataView",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [

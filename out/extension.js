@@ -9,6 +9,7 @@ const path = require("path");
 const constants_1 = require("./core/constants");
 const utils_1 = require("./core/utils");
 const code_type_resolver_1 = require("./domain/endpoints/code-type-resolver");
+const code_type_resolver_2 = require("./domain/endpoints/code-type-resolver");
 const endpoint_normalizer_1 = require("./domain/endpoints/endpoint-normalizer");
 const endpoint_validator_1 = require("./domain/validation/endpoint-validator");
 const draft_store_1 = require("./domain/assistant/draft-store");
@@ -284,13 +285,57 @@ function activate(context) {
             catch {
                 return undefined;
             }
-            const picked = await vscode.window.showQuickPick([
+            let endpointCodeType = 'SQL';
+            const marker = state.editMap.get(document.uri.toString());
+            if (marker && (marker.type === 'endpointCode' || marker.type === 'endpointJson')) {
+                try {
+                    const project = await state.getProjectDetails(marker.projectId);
+                    const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
+                    if (endpoint) {
+                        const tipoCodigoId = (0, utils_1.toNumber)(endpoint.ID_TIPO_CODIGO);
+                        const tipoCodigoLabel = (0, code_type_resolver_1.normalizeCodeTypeLabel)(endpoint.NO_TIPO_CODIGO);
+                        if (tipoCodigoId === 3 || tipoCodigoLabel === 'PYTHON') {
+                            endpointCodeType = 'PYTHON';
+                        }
+                        else if (tipoCodigoId === 2 || tipoCodigoLabel === 'PLSQL') {
+                            endpointCodeType = 'PLSQL';
+                        }
+                    }
+                }
+                catch {
+                    endpointCodeType = 'SQL';
+                }
+            }
+            const sqlActions = [
                 { label: 'SELECT', value: 'select' },
                 { label: 'INSERT', value: 'insert' },
                 { label: 'UPDATE', value: 'update' },
                 { label: 'DELETE', value: 'delete' },
-            ], {
-                placeHolder: `Inserir template SQL para ${payload.fullName}`,
+            ];
+            const plsqlActions = [
+                { label: 'PL/SQL: FOR LOOP', value: 'plsql_for_loop' },
+                { label: 'PL/SQL: SELECT INTO %ROWTYPE', value: 'plsql_select_into_rowtype' },
+                { label: 'PL/SQL: SELECT INTO (campos)', value: 'plsql_select_into_fields' },
+                { label: 'PL/SQL: BULK COLLECT INTO', value: 'plsql_bulk_collect_into' },
+            ];
+            const pythonActions = [
+                { label: 'Python: FOR (cursor.fetchall)', value: 'python_for_loop' },
+                { label: 'Python: SELECT INTO objeto (fetchone)', value: 'python_select_into_obj' },
+                { label: 'Python: SELECT INTO campos', value: 'python_select_into_fields' },
+                { label: 'Python: BULK COLLECT (fetchall)', value: 'python_bulk_collect_into' },
+            ];
+            const quickPickItems = endpointCodeType === 'PLSQL'
+                ? [...sqlActions, ...plsqlActions]
+                : endpointCodeType === 'PYTHON'
+                    ? [...sqlActions, ...pythonActions]
+                    : sqlActions;
+            const templateLabel = endpointCodeType === 'PLSQL'
+                ? 'SQL/PLSQL'
+                : endpointCodeType === 'PYTHON'
+                    ? 'SQL/Python'
+                    : 'SQL';
+            const picked = await vscode.window.showQuickPick(quickPickItems, {
+                placeHolder: `Inserir template ${templateLabel} para ${payload.fullName}`,
                 ignoreFocusOut: true,
             });
             if (!picked) {
@@ -581,6 +626,21 @@ function activate(context) {
         catch (error) {
             vscode.window.showErrorMessage(`Erro ao atualizar: ${(0, utils_1.toErrorMessage)(error)}`);
         }
+    }), vscode.commands.registerCommand('aria.searchTree', async () => {
+        const value = await vscode.window.showInputBox({
+            prompt: 'Buscar em projetos/endpoints (ignora acentos e maiúsculas)',
+            placeHolder: 'Digite nome do projeto, endpoint ou caminho',
+        });
+        if (value === undefined) {
+            return;
+        }
+        if (!value.trim()) {
+            tree.clearSearchQuery();
+            return;
+        }
+        tree.setSearchQuery(value);
+    }), vscode.commands.registerCommand('aria.clearTreeSearch', () => {
+        tree.clearSearchQuery();
     }), vscode.commands.registerCommand('aria.loadMetadataExplorer', async () => {
         if (!state.client) {
             vscode.window.showWarningMessage('Conecte primeiro.');
@@ -612,6 +672,21 @@ function activate(context) {
         catch (error) {
             vscode.window.showErrorMessage(`Falha ao atualizar metadados: ${(0, utils_1.toErrorMessage)(error)}`);
         }
+    }), vscode.commands.registerCommand('aria.searchMetadataExplorer', async () => {
+        const value = await vscode.window.showInputBox({
+            prompt: 'Buscar em schemas/tabelas/colunas (ignora acentos e maiúsculas)',
+            placeHolder: 'Digite schema, tabela ou coluna',
+        });
+        if (value === undefined) {
+            return;
+        }
+        if (!value.trim()) {
+            metadataTree.clearSearchQuery();
+            return;
+        }
+        metadataTree.setSearchQuery(value);
+    }), vscode.commands.registerCommand('aria.clearMetadataSearch', () => {
+        metadataTree.clearSearchQuery();
     }), vscode.commands.registerCommand('aria.editProjectJson', async (node) => {
         if (!state.dataset || !node) {
             return;
@@ -666,7 +741,7 @@ function activate(context) {
         if (!endpoint) {
             throw new Error('Endpoint nao encontrado.');
         }
-        const ext = (0, code_type_resolver_1.resolveEndpointCodeExtension)(endpoint);
+        const ext = (0, code_type_resolver_2.resolveEndpointCodeExtension)(endpoint);
         const lang = ext === 'py' ? 'python' : 'sql';
         const doc = await openVirtualEditDocument(`endpoint-${node.endpoint.ID_REST_CUSTOM}.aria.${ext}`, endpoint.TX_CODIGO ?? '', lang);
         state.editMap.set(doc.uri.toString(), { type: 'endpointCode', id: node.endpoint.ID_REST_CUSTOM, projectId: node.project.ID_PROJETO });

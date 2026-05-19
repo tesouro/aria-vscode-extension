@@ -5,6 +5,7 @@ import * as path from 'path';
 import type { AriaDataset, AriaProject, AriaEndpoint, ApiSettings, AriaLovs, AriaBancoEsquema, EditMarker, PreviaPayload } from './core/types';
 import { ARIA_EDIT_SCHEME } from './core/constants';
 import { toStringSafe, toNumber, toErrorMessage, normalizeEndpointPath, normalizeTextForLookup } from './core/utils';
+import { normalizeCodeTypeLabel } from './domain/endpoints/code-type-resolver';
 import { resolveEndpointCodeExtension } from './domain/endpoints/code-type-resolver';
 import { buildEndpointFromExampleStructure, applyLovDisplayValues } from './domain/endpoints/endpoint-normalizer';
 import { validateEndpointPayload } from './domain/validation/endpoint-validator';
@@ -298,15 +299,60 @@ export function activate(context: vscode.ExtensionContext): void {
             return undefined;
           }
 
+          let endpointCodeType: 'SQL' | 'PLSQL' | 'PYTHON' = 'SQL';
+          const marker = state.editMap.get(document.uri.toString());
+          if (marker && (marker.type === 'endpointCode' || marker.type === 'endpointJson')) {
+            try {
+              const project = await state.getProjectDetails(marker.projectId);
+              const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
+              if (endpoint) {
+                const tipoCodigoId = toNumber(endpoint.ID_TIPO_CODIGO);
+                const tipoCodigoLabel = normalizeCodeTypeLabel(endpoint.NO_TIPO_CODIGO);
+                if (tipoCodigoId === 3 || tipoCodigoLabel === 'PYTHON') {
+                  endpointCodeType = 'PYTHON';
+                } else if (tipoCodigoId === 2 || tipoCodigoLabel === 'PLSQL') {
+                  endpointCodeType = 'PLSQL';
+                }
+              }
+            } catch {
+              endpointCodeType = 'SQL';
+            }
+          }
+
+          const sqlActions = [
+            { label: 'SELECT', value: 'select' as SqlTemplateAction },
+            { label: 'INSERT', value: 'insert' as SqlTemplateAction },
+            { label: 'UPDATE', value: 'update' as SqlTemplateAction },
+            { label: 'DELETE', value: 'delete' as SqlTemplateAction },
+          ];
+          const plsqlActions = [
+            { label: 'PL/SQL: FOR LOOP', value: 'plsql_for_loop' as SqlTemplateAction },
+            { label: 'PL/SQL: SELECT INTO %ROWTYPE', value: 'plsql_select_into_rowtype' as SqlTemplateAction },
+            { label: 'PL/SQL: SELECT INTO (campos)', value: 'plsql_select_into_fields' as SqlTemplateAction },
+            { label: 'PL/SQL: BULK COLLECT INTO', value: 'plsql_bulk_collect_into' as SqlTemplateAction },
+          ];
+          const pythonActions = [
+            { label: 'Python: FOR (cursor.fetchall)', value: 'python_for_loop' as SqlTemplateAction },
+            { label: 'Python: SELECT INTO objeto (fetchone)', value: 'python_select_into_obj' as SqlTemplateAction },
+            { label: 'Python: SELECT INTO campos', value: 'python_select_into_fields' as SqlTemplateAction },
+            { label: 'Python: BULK COLLECT (fetchall)', value: 'python_bulk_collect_into' as SqlTemplateAction },
+          ];
+
+          const quickPickItems = endpointCodeType === 'PLSQL'
+            ? [...sqlActions, ...plsqlActions]
+            : endpointCodeType === 'PYTHON'
+              ? [...sqlActions, ...pythonActions]
+              : sqlActions;
+          const templateLabel = endpointCodeType === 'PLSQL'
+            ? 'SQL/PLSQL'
+            : endpointCodeType === 'PYTHON'
+              ? 'SQL/Python'
+              : 'SQL';
+
           const picked = await vscode.window.showQuickPick(
-            [
-              { label: 'SELECT', value: 'select' as SqlTemplateAction },
-              { label: 'INSERT', value: 'insert' as SqlTemplateAction },
-              { label: 'UPDATE', value: 'update' as SqlTemplateAction },
-              { label: 'DELETE', value: 'delete' as SqlTemplateAction },
-            ],
+            quickPickItems,
             {
-              placeHolder: `Inserir template SQL para ${payload.fullName}`,
+              placeHolder: `Inserir template ${templateLabel} para ${payload.fullName}`,
               ignoreFocusOut: true,
             }
           );
@@ -595,6 +641,20 @@ export function activate(context: vscode.ExtensionContext): void {
       catch (error) { vscode.window.showErrorMessage(`Erro ao atualizar: ${toErrorMessage(error)}`); }
     }),
 
+    vscode.commands.registerCommand('aria.searchTree', async () => {
+      const value = await vscode.window.showInputBox({
+        prompt: 'Buscar em projetos/endpoints (ignora acentos e maiúsculas)',
+        placeHolder: 'Digite nome do projeto, endpoint ou caminho',
+      });
+      if (value === undefined) { return; }
+      if (!value.trim()) { tree.clearSearchQuery(); return; }
+      tree.setSearchQuery(value);
+    }),
+
+    vscode.commands.registerCommand('aria.clearTreeSearch', () => {
+      tree.clearSearchQuery();
+    }),
+
     vscode.commands.registerCommand('aria.loadMetadataExplorer', async () => {
       if (!state.client) { vscode.window.showWarningMessage('Conecte primeiro.'); return; }
       try {
@@ -618,6 +678,20 @@ export function activate(context: vscode.ExtensionContext): void {
       } catch (error) {
         vscode.window.showErrorMessage(`Falha ao atualizar metadados: ${toErrorMessage(error)}`);
       }
+    }),
+
+    vscode.commands.registerCommand('aria.searchMetadataExplorer', async () => {
+      const value = await vscode.window.showInputBox({
+        prompt: 'Buscar em schemas/tabelas/colunas (ignora acentos e maiúsculas)',
+        placeHolder: 'Digite schema, tabela ou coluna',
+      });
+      if (value === undefined) { return; }
+      if (!value.trim()) { metadataTree.clearSearchQuery(); return; }
+      metadataTree.setSearchQuery(value);
+    }),
+
+    vscode.commands.registerCommand('aria.clearMetadataSearch', () => {
+      metadataTree.clearSearchQuery();
     }),
 
     vscode.commands.registerCommand('aria.editProjectJson', async (node?: ProjectNode) => {
