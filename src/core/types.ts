@@ -80,6 +80,7 @@ export interface AriaBancoEsquema {
 export interface AriaBancoExterno {
   ID_BANCO_EXTERNO: number;
   CO_BANCO_EXTERNO: string;
+  TX_DATASOURCE?: string;
   BANCO_ESQUEMA: AriaBancoEsquema[];
 }
 

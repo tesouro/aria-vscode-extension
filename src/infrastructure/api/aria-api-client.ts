@@ -79,8 +79,9 @@ export class AriaApiClient {
     return rows.map((item) => this.mapEndpointValidation(item));
   }
 
-  async getLovs(projectId: number): Promise<AriaLovs> {
-    const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/lovs', { id_projeto: String(projectId) });
+  async getLovs(projectId?: number): Promise<AriaLovs> {
+    const query = projectId != null && projectId > 0 ? { id_projeto: String(projectId) } : undefined;
+    const response = await this.request<unknown>('GET', '/v1/aria-vscode/custom/lovs', query);
     return normalizeLovsResponse(response);
   }
 

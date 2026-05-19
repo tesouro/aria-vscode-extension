@@ -37,6 +37,11 @@
           "id": "ariaProjectsView",
           "name": "Projetos ARIA",
           "icon": "resources/aria.svg"
+        },
+        {
+          "id": "ariaMetadataView",
+          "name": "Metadados do Banco",
+          "icon": "resources/aria.svg"
         }
       ],
       "ariaPreviewPanel": [
@@ -52,6 +57,16 @@
         "view": "ariaProjectsView",
         "contents": "### Acesso necessario\nEntre com sua conta institucional para carregar os projetos do ARIA.\n\n[Entrar com Tesouro.gov.br](command:aria.connect)",
         "when": "!aria.isLoggedIn"
+      },
+      {
+        "view": "ariaMetadataView",
+        "contents": "### Acesso necessario\nEntre com sua conta institucional para consultar os metadados.\n\n[Entrar com Tesouro.gov.br](command:aria.connect)",
+        "when": "!aria.isLoggedIn"
+      },
+      {
+        "view": "ariaMetadataView",
+        "contents": "Carregue um banco externo e um esquema opcional para listar esquemas, tabelas e colunas.\n\n[Carregar metadados](command:aria.loadMetadataExplorer)",
+        "when": "aria.isLoggedIn"
       }
     ],
     "commands": [
@@ -63,6 +78,16 @@
       {
         "command": "aria.refreshTree",
         "title": "ARIA: Atualizar Arvore",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "aria.loadMetadataExplorer",
+        "title": "ARIA: Carregar Metadados",
+        "icon": "$(database)"
+      },
+      {
+        "command": "aria.refreshMetadataExplorer",
+        "title": "ARIA: Atualizar Metadados",
         "icon": "$(refresh)"
       },
       {
@@ -92,6 +117,11 @@
         "command": "aria.editEndpointForm",
         "title": "Editar em Formulario",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "aria.openEndpointMetadata",
+        "title": "Ver Metadados",
+        "icon": "$(database)"
       },
       {
         "command": "aria.saveActiveEditor",
@@ -135,6 +165,16 @@
           "command": "aria.createProject",
           "when": "view == ariaProjectsView",
           "group": "navigation@3"
+        },
+        {
+          "command": "aria.loadMetadataExplorer",
+          "when": "view == ariaMetadataView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "aria.refreshMetadataExplorer",
+          "when": "view == ariaMetadataView",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -157,6 +197,11 @@
           "command": "aria.editEndpointForm",
           "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
           "group": "aria@3"
+        },
+        {
+          "command": "aria.openEndpointMetadata",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@4"
         },
         {
           "command": "aria.createEndpoint",
@@ -194,6 +239,11 @@
           "command": "aria.previewActiveEditorData",
           "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|sql)$/",
           "group": "navigation@3"
+        },
+        {
+          "command": "aria.openEndpointMetadata",
+          "when": "resourceFilename =~ /^endpoint-.*\\.aria\\.(json|sql|py)$/",
+          "group": "navigation@4"
         }
       ]
     },
@@ -235,8 +285,7 @@
         "id": "aria.assistant",
         "name": "aria",
         "fullName": "ARIA Assistant",
-        "description": "Assistente para gerenciar projetos e endpoints da API ARIA: consultar, editar código SQL/Python, ver metadados de banco e criar endpoints.",
-        "isSticky": true
+        "description": "Assistente para gerenciar projetos e endpoints da API ARIA: consultar, editar código SQL/Python, ver metadados de banco e criar endpoints."
       }
     ],
     "languageModelTools": [
@@ -252,16 +301,15 @@
       {
         "name": "aria_obter_lovs",
         "displayName": "ARIA: Obter LOVs do Projeto",
-        "modelDescription": "Retorna os valores válidos (LOVs) para os campos do projeto: métodos HTTP (ID_METODO), tipos de código (ID_TIPO_CODIGO), tipos de header, bancos externos (ID_BANCO_EXTERNO com seus esquemas em BANCO_ESQUEMA[]), perfis de acesso, tipos de OTP, etc. Use para saber quais valores preencher nos campos do endpoint.",
+        "modelDescription": "Retorna os valores válidos (LOVs) para os campos do projeto: métodos HTTP (ID_METODO), tipos de código (ID_TIPO_CODIGO), tipos de header, bancos externos (ID_BANCO_EXTERNO com seus esquemas em BANCO_ESQUEMA[]), perfis de acesso, tipos de OTP, etc. Use para saber quais valores preencher nos campos do endpoint. O id_projeto é opcional quando a consulta for apenas para conexões de banco.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "id_projeto": {
               "type": "number",
-              "description": "ID do projeto ARIA (ID_PROJETO)."
+              "description": "Opcional: ID do projeto ARIA (ID_PROJETO)."
             }
-          },
-          "required": ["id_projeto"]
+          }
         }
       },
       {
@@ -276,7 +324,9 @@
               "description": "ID do projeto ARIA (ID_PROJETO)."
             }
           },
-          "required": ["id_projeto"]
+          "required": [
+            "id_projeto"
+          ]
         }
       },
       {
@@ -315,7 +365,9 @@
               }
             }
           },
-          "required": ["p_id_banco_externo"]
+          "required": [
+            "p_id_banco_externo"
+          ]
         }
       },
       {
@@ -334,7 +386,9 @@
               "description": "Opcional. ID do esquema do banco (ID_BANCO_ESQUEMA)."
             }
           },
-          "required": ["p_id_banco_externo"]
+          "required": [
+            "p_id_banco_externo"
+          ]
         }
       },
       {
@@ -357,7 +411,9 @@
               "description": "Nome do schema para filtrar tabelas (ex: COSIS_MICRO)."
             }
           },
-          "required": ["p_id_banco_externo"]
+          "required": [
+            "p_id_banco_externo"
+          ]
         }
       },
       {
@@ -384,7 +440,10 @@
               "description": "Nome da tabela (com ou sem schema), ex: MICROSERVICOS ou COSIS_MICRO.MICROSERVICO."
             }
           },
-          "required": ["p_id_banco_externo", "tabela"]
+          "required": [
+            "p_id_banco_externo",
+            "tabela"
+          ]
         }
       },
       {
@@ -403,7 +462,10 @@
               "description": "Objeto JSON do endpoint (REST_CUSTOM) com campos canonicos."
             }
           },
-          "required": ["id_projeto", "endpoint"]
+          "required": [
+            "id_projeto",
+            "endpoint"
+          ]
         }
       },
       {
@@ -418,7 +480,9 @@
               "description": "ID do draft retornado por aria_create_endpoint_draft."
             }
           },
-          "required": ["draftId"]
+          "required": [
+            "draftId"
+          ]
         }
       },
       {
@@ -433,7 +497,9 @@
               "description": "ID do draft validado retornado por aria_create_endpoint_draft."
             }
           },
-          "required": ["draftId"]
+          "required": [
+            "draftId"
+          ]
         }
       },
       {
@@ -448,7 +514,9 @@
               "description": "Objeto com a estrutura { 'registros': [{ ...dadosDoProjeto..., REST_CUSTOM: [<endpoint>] }] }."
             }
           },
-          "required": ["json_projeto"]
+          "required": [
+            "json_projeto"
+          ]
         }
       },
       {
@@ -467,7 +535,10 @@
               "description": "Objeto JSON do endpoint (REST_CUSTOM) com todos os campos: NO_REST_CUSTOM, TX_PATH, TX_CODIGO, ID_METODO, ID_TIPO_CODIGO, ID_BANCO_EXTERNO, etc."
             }
           },
-          "required": ["id_projeto", "endpoint"]
+          "required": [
+            "id_projeto",
+            "endpoint"
+          ]
         }
       }
     ]

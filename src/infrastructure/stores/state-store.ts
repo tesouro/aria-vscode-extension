@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { AriaDataset, AriaProject, AriaEndpoint, AriaLovs, EndpointFormItem,
   EndpointValidationItem, ParsedMetadataCatalog, EditMarker } from '../../core/types';
 import { toErrorMessage, buildMetadataKey } from '../../core/utils';
+import { parseMetadataMarkdown } from '../../domain/metadata/metadata-parser';
 import type { AriaApiClient } from '../api/aria-api-client';
 import type { DraftStore } from '../../domain/assistant/draft-store';
 
@@ -33,6 +36,8 @@ export class StateStore {
     this.endpointFormItemsCache = undefined;
     this.endpointValidationsCache = undefined;
     this.lovsCache.clear();
+    this.metadataUriByEndpoint.clear();
+    this.metadataCatalogByEndpoint.clear();
   }
 
   async getProjectDetails(projectId: number): Promise<AriaProject> {
@@ -55,15 +60,17 @@ export class StateStore {
     }
   }
 
-  async getProjectLovs(projectId: number): Promise<AriaLovs | undefined> {
+  async getProjectLovs(projectId?: number): Promise<AriaLovs | undefined> {
     if (!this.client) { return undefined; }
-    if (this.lovsCache.has(projectId)) { return this.lovsCache.get(projectId); }
+    const cacheKey = projectId ?? 0;
+    if (this.lovsCache.has(cacheKey)) { return this.lovsCache.get(cacheKey); }
     try {
       const lovs = await this.client.getLovs(projectId);
-      this.lovsCache.set(projectId, lovs);
+      this.lovsCache.set(cacheKey, lovs);
       return lovs;
     } catch (error) {
-      vscode.window.showWarningMessage(`Nao foi possivel carregar LOVs do projeto ${projectId}. Motivo: ${toErrorMessage(error)}`);
+      const scope = projectId != null ? `do projeto ${projectId}` : 'globais';
+      vscode.window.showWarningMessage(`Nao foi possivel carregar LOVs ${scope}. Motivo: ${toErrorMessage(error)}`);
       return undefined;
     }
   }
@@ -89,12 +96,53 @@ export class StateStore {
     if (!uri) { return undefined; }
 
     try {
-      const fs = await import('fs');
       const markdown = await fs.promises.readFile(uri.fsPath, 'utf8');
-      const { parseMetadataMarkdown } = await import('../../domain/metadata/metadata-parser');
       const catalog = parseMetadataMarkdown(markdown, uri.fsPath, metadataKey);
       this.metadataCatalogByEndpoint.set(metadataKey, catalog);
       return catalog;
     } catch { return undefined; }
+  }
+
+  async ensureMetadataCatalog(
+    idBancoExterno: number,
+    idBancoEsquema?: number,
+    options?: { forceRefresh?: boolean }
+  ): Promise<ParsedMetadataCatalog | undefined> {
+    const metadataKey = buildMetadataKey(idBancoExterno, idBancoEsquema);
+
+    if (!options?.forceRefresh) {
+      const cached = await this.getMetadataCatalog(idBancoExterno, idBancoEsquema);
+      if (cached) { return cached; }
+    }
+
+    if (!this.client) { return undefined; }
+
+    const endpoint: AriaEndpoint = {
+      ID_REST_CUSTOM: 0,
+      NO_REST_CUSTOM: 'Metadata Explorer',
+      TX_PATH: '/metadata',
+      ID_BANCO_EXTERNO: idBancoExterno,
+      ...(idBancoEsquema && idBancoEsquema > 0 ? { ID_BANCO_ESQUEMA: idBancoEsquema } : {}),
+    };
+
+    const markdown = await this.client.getEndpointMetadata(endpoint);
+    if (!markdown) { return undefined; }
+
+    const filePath = this.getMetadataFilePath(idBancoExterno, idBancoEsquema);
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, markdown, 'utf8');
+
+    const catalog = parseMetadataMarkdown(markdown, filePath, metadataKey);
+    this.metadataUriByEndpoint.set(metadataKey, vscode.Uri.file(filePath));
+    this.metadataCatalogByEndpoint.set(metadataKey, catalog);
+    return catalog;
+  }
+
+  private getMetadataFilePath(idBancoExterno: number, idBancoEsquema?: number): string {
+    const metadataDir = path.join(__dirname, '..', '..', 'resources');
+    const fileName = idBancoEsquema && idBancoEsquema > 0
+      ? `metadata-${idBancoExterno}-${idBancoEsquema}.aria.txt`
+      : `metadata-${idBancoExterno}.aria.txt`;
+    return path.join(metadataDir, fileName);
   }
 }

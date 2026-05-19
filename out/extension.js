@@ -16,12 +16,14 @@ const aria_api_client_1 = require("./infrastructure/api/aria-api-client");
 const entra_auth_service_1 = require("./infrastructure/auth/entra-auth-service");
 const state_store_1 = require("./infrastructure/stores/state-store");
 const tree_provider_1 = require("./vscode/tree/tree-provider");
+const metadata_tree_provider_1 = require("./vscode/tree/metadata-tree-provider");
 const virtual_fs_provider_1 = require("./vscode/editors/virtual-fs-provider");
 const form_webview_1 = require("./vscode/editors/form-webview");
 const preview_params_webview_1 = require("./vscode/editors/preview-params-webview");
 const preview_result_view_1 = require("./vscode/editors/preview-result-view");
 const tools_1 = require("./vscode/assistant/tools");
 const chat_participant_1 = require("./vscode/assistant/chat-participant");
+const sql_template_builder_1 = require("./domain/sql/sql-template-builder");
 function getSettings() {
     const config = vscode.workspace.getConfiguration('ariaApi');
     return {
@@ -61,8 +63,16 @@ function activate(context) {
     const authService = new entra_auth_service_1.EntraAuthService();
     const virtualEditProvider = new virtual_fs_provider_1.InMemoryEditFileSystemProvider();
     const tree = new tree_provider_1.AriaTreeProvider(() => state.dataset);
+    const metadataTree = new metadata_tree_provider_1.AriaMetadataTreeProvider();
+    const metadataDragAndDrop = new metadata_tree_provider_1.AriaMetadataDragAndDropController();
+    const metadataTreeView = vscode.window.createTreeView('ariaMetadataView', {
+        treeDataProvider: metadataTree,
+        dragAndDropController: metadataDragAndDrop,
+        showCollapseAll: true,
+    });
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     const updateStatusBar = (loggedIn) => {
+        void vscode.commands.executeCommand('setContext', 'aria.isLoggedIn', loggedIn);
         if (loggedIn) {
             statusBarItem.text = '$(cloud-upload) ARIA: Conectado';
             statusBarItem.command = 'aria.logout';
@@ -75,7 +85,7 @@ function activate(context) {
         }
         statusBarItem.show();
     };
-    context.subscriptions.push(output, vscode.workspace.registerFileSystemProvider(constants_1.ARIA_EDIT_SCHEME, virtualEditProvider, { isCaseSensitive: true }), vscode.window.registerTreeDataProvider('ariaProjectsView', tree), statusBarItem);
+    context.subscriptions.push(output, vscode.workspace.registerFileSystemProvider(constants_1.ARIA_EDIT_SCHEME, virtualEditProvider, { isCaseSensitive: true }), vscode.window.registerTreeDataProvider('ariaProjectsView', tree), metadataTreeView, statusBarItem);
     // ── Helpers ─────────────────────────────────────────────────────────────
     const createVirtualEditUri = (fileName) => vscode.Uri.from({ scheme: constants_1.ARIA_EDIT_SCHEME, path: `/${fileName}` });
     const openVirtualEditDocument = async (fileName, content, language) => {
@@ -168,6 +178,54 @@ function activate(context) {
             payload: buildPreviewPayload(previewSource),
         };
     };
+    const resolveMetadataSelectionForActiveEditor = async (editor) => {
+        const marker = state.editMap.get(editor.document.uri.toString());
+        if (!marker || (marker.type !== 'endpointCode' && marker.type !== 'endpointJson')) {
+            throw new Error('Metadados disponiveis apenas para editores de endpoint em codigo ou JSON.');
+        }
+        const project = await state.getProjectDetails(marker.projectId);
+        const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === marker.id);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        let sourceEndpoint = endpoint;
+        if (marker.type === 'endpointJson') {
+            try {
+                const parsed = JSON.parse(editor.document.getText());
+                sourceEndpoint = { ...endpoint, ...parsed, ID_REST_CUSTOM: endpoint.ID_REST_CUSTOM };
+            }
+            catch (error) {
+                throw new Error(`JSON invalido no editor: ${(0, utils_1.toErrorMessage)(error)}`);
+            }
+        }
+        const idBancoExterno = (0, utils_1.toNumber)(sourceEndpoint.ID_BANCO_EXTERNO);
+        if (idBancoExterno <= 0) {
+            throw new Error('O endpoint nao possui ID_BANCO_EXTERNO preenchido.');
+        }
+        const idBancoEsquemaRaw = (0, utils_1.toNumber)(sourceEndpoint.ID_BANCO_ESQUEMA);
+        const idBancoEsquema = idBancoEsquemaRaw > 0 ? idBancoEsquemaRaw : undefined;
+        const lovs = await state.getProjectLovs(undefined);
+        const banco = lovs?.BANCO_EXTERNO?.find((item) => item.ID_BANCO_EXTERNO === idBancoExterno);
+        const schema = banco?.BANCO_ESQUEMA.find((item) => item.ID_BANCO_ESQUEMA === idBancoEsquema);
+        return {
+            projectId: marker.projectId,
+            projectName: project.NO_PROJETO,
+            idBancoExterno,
+            bancoLabel: banco?.CO_BANCO_EXTERNO || `Banco ${idBancoExterno}`,
+            idBancoEsquema,
+            schemaLabel: schema?.NO_ESQUEMA,
+            txDataSource: banco?.TX_DATASOURCE,
+            sourceLabel: `${(0, utils_1.toStringSafe)(sourceEndpoint.NO_REST_CUSTOM) || `Endpoint ${marker.id}`} (${(0, utils_1.toStringSafe)(sourceEndpoint.TX_PATH)})`,
+        };
+    };
+    const hasEndpointNodeShape = (value) => {
+        const candidate = value;
+        return !!candidate
+            && typeof candidate === 'object'
+            && !!candidate.project
+            && typeof candidate.project === 'object'
+            && typeof candidate.project.ID_PROJETO === 'number';
+    };
     let activePreviewSession;
     let previewResultView;
     const ensurePreviewPanelVisible = async () => {
@@ -209,6 +267,128 @@ function activate(context) {
         await runPreviewExecution(nextPayload);
     });
     context.subscriptions.push(vscode.window.registerWebviewViewProvider('ariaQueryResultView', previewResultView, { webviewOptions: { retainContextWhenHidden: true } }));
+    context.subscriptions.push(vscode.languages.registerDocumentDropEditProvider([{ scheme: constants_1.ARIA_EDIT_SCHEME }], {
+        provideDocumentDropEdits: async (document, _position, dataTransfer) => {
+            const fileName = path.basename(document.uri.path).toLowerCase();
+            if (!/^endpoint-.*\.aria\.(json|sql|py)$/.test(fileName)) {
+                return undefined;
+            }
+            const dropped = dataTransfer.get(metadata_tree_provider_1.ARIA_METADATA_TABLE_MIME);
+            if (!dropped) {
+                return undefined;
+            }
+            let payload;
+            try {
+                payload = JSON.parse(await dropped.asString());
+            }
+            catch {
+                return undefined;
+            }
+            const picked = await vscode.window.showQuickPick([
+                { label: 'SELECT', value: 'select' },
+                { label: 'INSERT', value: 'insert' },
+                { label: 'UPDATE', value: 'update' },
+                { label: 'DELETE', value: 'delete' },
+            ], {
+                placeHolder: `Inserir template SQL para ${payload.fullName}`,
+                ignoreFocusOut: true,
+            });
+            if (!picked) {
+                return new vscode.DocumentDropEdit('');
+            }
+            return new vscode.DocumentDropEdit(`${(0, sql_template_builder_1.buildSqlTemplateFromMetadataDrop)(payload, picked.value)}\n`);
+        },
+    }));
+    const pickMetadataSelection = async () => {
+        const lovs = await state.getProjectLovs(undefined);
+        const bancos = lovs?.BANCO_EXTERNO ?? [];
+        if (bancos.length === 0) {
+            vscode.window.showWarningMessage('As LOVs nao retornaram conexoes de banco externo.');
+            return undefined;
+        }
+        const bancoItems = bancos
+            .slice()
+            .sort((left, right) => left.CO_BANCO_EXTERNO.localeCompare(right.CO_BANCO_EXTERNO))
+            .map((banco) => ({
+            label: banco.CO_BANCO_EXTERNO,
+            description: `ID ${banco.ID_BANCO_EXTERNO}`,
+            detail: banco.BANCO_ESQUEMA.length > 0 ? `${banco.BANCO_ESQUEMA.length} esquema(s)` : 'Sem esquemas cadastrados',
+            banco,
+        }));
+        const pickedBanco = await vscode.window.showQuickPick(bancoItems, { placeHolder: 'Selecione o banco externo' });
+        if (!pickedBanco) {
+            return undefined;
+        }
+        const schemaItems = [
+            {
+                label: 'Conexão Padrão',
+                description: 'Consulta sem filtro de banco esquema',
+                schema: undefined,
+            },
+            ...pickedBanco.banco.BANCO_ESQUEMA
+                .slice()
+                .sort((left, right) => left.NO_ESQUEMA.localeCompare(right.NO_ESQUEMA))
+                .map((schema) => ({
+                label: schema.NO_ESQUEMA,
+                description: `ID ${schema.ID_BANCO_ESQUEMA}`,
+                schema,
+            })),
+        ];
+        const pickedSchema = await vscode.window.showQuickPick(schemaItems, { placeHolder: 'Selecione o banco esquema (opcional)' });
+        if (!pickedSchema) {
+            return undefined;
+        }
+        return {
+            projectId: 0,
+            projectName: 'Conexao global',
+            idBancoExterno: pickedBanco.banco.ID_BANCO_EXTERNO,
+            bancoLabel: pickedBanco.banco.CO_BANCO_EXTERNO,
+            idBancoEsquema: pickedSchema.schema?.ID_BANCO_ESQUEMA,
+            schemaLabel: pickedSchema.schema?.NO_ESQUEMA,
+            txDataSource: pickedBanco.banco.TX_DATASOURCE,
+        };
+    };
+    const loadMetadataIntoExplorer = async (selection, options) => {
+        const indicator = vscode.window.setStatusBarMessage('$(sync~spin) ARIA: carregando metadados...');
+        try {
+            const catalog = await state.ensureMetadataCatalog(selection.idBancoExterno, selection.idBancoEsquema, options);
+            if (!catalog) {
+                throw new Error('A API nao retornou metadados para o banco informado.');
+            }
+            metadataTree.setCatalog(selection, catalog);
+            await vscode.commands.executeCommand('ariaMetadataView.focus');
+        }
+        finally {
+            indicator.dispose();
+        }
+    };
+    const resolveMetadataSelectionFromEndpoint = async (node) => {
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const endpoint = project.REST_CUSTOM.find((item) => item.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        const idBancoExterno = (0, utils_1.toNumber)(endpoint.ID_BANCO_EXTERNO);
+        if (idBancoExterno <= 0) {
+            vscode.window.showWarningMessage('O endpoint selecionado nao possui ID_BANCO_EXTERNO preenchido.');
+            return undefined;
+        }
+        const idBancoEsquemaRaw = (0, utils_1.toNumber)(endpoint.ID_BANCO_ESQUEMA);
+        const idBancoEsquema = idBancoEsquemaRaw > 0 ? idBancoEsquemaRaw : undefined;
+        const lovs = await state.getProjectLovs(node.project.ID_PROJETO);
+        const banco = lovs?.BANCO_EXTERNO?.find((item) => item.ID_BANCO_EXTERNO === idBancoExterno);
+        const schema = banco?.BANCO_ESQUEMA.find((item) => item.ID_BANCO_ESQUEMA === idBancoEsquema);
+        return {
+            projectId: node.project.ID_PROJETO,
+            projectName: node.project.NO_PROJETO,
+            idBancoExterno,
+            bancoLabel: banco?.CO_BANCO_EXTERNO || `Banco ${idBancoExterno}`,
+            idBancoEsquema,
+            schemaLabel: schema?.NO_ESQUEMA,
+            txDataSource: banco?.TX_DATASOURCE,
+            sourceLabel: `${node.endpoint.NO_REST_CUSTOM} (${node.endpoint.TX_PATH})`,
+        };
+    };
     const saveWithFreshDataset = async (source, projectId, mutate) => {
         const client = state.getClient();
         const freshDataset = await client.getDatasetByProjectId(projectId);
@@ -370,6 +550,7 @@ function activate(context) {
             state.resetCaches();
             state.dataset = await state.client.getProjectEndpointTree();
             tree.refresh();
+            metadataTree.clear();
             vscode.window.showInformationMessage(`Conectado. ${state.dataset.registros.length} projeto(s) carregados.`);
         }
         catch (error) {
@@ -382,6 +563,7 @@ function activate(context) {
             state.client = undefined;
             state.dataset = undefined;
             tree.refresh();
+            metadataTree.clear();
             vscode.window.showInformationMessage('Desconectado.');
         }
         catch (error) {
@@ -398,6 +580,37 @@ function activate(context) {
         }
         catch (error) {
             vscode.window.showErrorMessage(`Erro ao atualizar: ${(0, utils_1.toErrorMessage)(error)}`);
+        }
+    }), vscode.commands.registerCommand('aria.loadMetadataExplorer', async () => {
+        if (!state.client) {
+            vscode.window.showWarningMessage('Conecte primeiro.');
+            return;
+        }
+        try {
+            const selection = await pickMetadataSelection();
+            if (!selection) {
+                return;
+            }
+            await loadMetadataIntoExplorer(selection);
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Falha ao carregar metadados: ${(0, utils_1.toErrorMessage)(error)}`);
+        }
+    }), vscode.commands.registerCommand('aria.refreshMetadataExplorer', async () => {
+        if (!state.client) {
+            vscode.window.showWarningMessage('Conecte primeiro.');
+            return;
+        }
+        const selection = metadataTree.getSelection();
+        if (!selection) {
+            vscode.window.showWarningMessage('Nenhum metadata carregado no explorador.');
+            return;
+        }
+        try {
+            await loadMetadataIntoExplorer(selection, { forceRefresh: true });
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Falha ao atualizar metadados: ${(0, utils_1.toErrorMessage)(error)}`);
         }
     }), vscode.commands.registerCommand('aria.editProjectJson', async (node) => {
         if (!state.dataset || !node) {
@@ -508,6 +721,29 @@ function activate(context) {
                 txCodigo: (0, utils_1.toStringSafe)(merged.TX_CODIGO),
             });
         }, async (payload) => state.getClient().getPrevia(payload));
+    }), vscode.commands.registerCommand('aria.openEndpointMetadata', async (node) => {
+        if (!state.client || !state.dataset) {
+            return;
+        }
+        try {
+            let selection;
+            if (hasEndpointNodeShape(node)) {
+                selection = await resolveMetadataSelectionFromEndpoint(node);
+            }
+            else {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    selection = await resolveMetadataSelectionForActiveEditor(editor);
+                }
+            }
+            if (!selection) {
+                return;
+            }
+            await loadMetadataIntoExplorer(selection);
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Falha ao abrir metadados do endpoint: ${(0, utils_1.toErrorMessage)(error)}`);
+        }
     }), vscode.commands.registerCommand('aria.createEndpoint', async (node) => {
         if (!state.dataset) {
             vscode.window.showWarningMessage('Conecte primeiro.');
