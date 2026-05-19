@@ -56,6 +56,16 @@ describe('evaluateSimplePlsqlExpression', () => {
   it('evaluates OR', () => {
     assert.equal(evaluateSimplePlsqlExpression(":A is null or :B = 1", { A: null, B: 0 }), true);
   });
+  it('normalizes lowercase APEX item bind variables', () => {
+    assert.equal(
+      evaluateSimplePlsqlExpression(':p4_tx_mime_type is not null or :p4_id_tipo_codigo = 1 or :p4_id_tipo_header = 2', {
+        TX_MIME_TYPE: 'application/json',
+        ID_TIPO_CODIGO: 0,
+        ID_TIPO_HEADER: 0,
+      }),
+      true
+    );
+  });
   it('returns undefined for empty', () => {
     assert.equal(evaluateSimplePlsqlExpression('', {}), undefined);
   });
@@ -99,6 +109,64 @@ describe('validateEndpointPayload', () => {
     }];
     const errors = validateEndpointPayload({ TX_PATH: '' }, validations as any);
     assert.ok(!errors.includes('Path obrigatorio'));
+  });
+
+  it('resolves ITEM_NAME to ITEM_SOURCE for not-null validation', () => {
+    const validations = [{
+      VALIDATION_NAME: 'V3',
+      VALIDATION_TYPE: 'Item\\Column Specified Is Not Null',
+      VALIDATION_EXPRESSION1: 'p4_tx_mime_header',
+      VALIDATION_FAILURE_TEXT: 'Mime-Type obrigatorio',
+      REGION_SEQUENCE: 1,
+      VALIDATION_SEQUENCE: 3,
+      CONDITION_TYPE: '',
+      CONDITION_EXPRESSION1: '',
+      CONDITION_EXPRESSION2: '',
+    }];
+
+    const endpointItems = [{
+      ITEM_SEQUENCE: 160,
+      REGION_SEQUENCE: 10,
+      IS_REQUIRED: 'No',
+      DISPLAY_AS: 'Text Field',
+      ITEM_SOURCE: 'TX_MIME_TYPE',
+      LABEL: 'Mime-Type Header',
+      ITEM_SOURCE_TYPE: 'Database Column',
+      REGION: 'Infos basicas',
+      ITEM_NAME: 'P4_TX_MIME_HEADER',
+    }];
+
+    const errors = validateEndpointPayload({ TX_MIME_TYPE: 'application/json' }, validations as any, endpointItems as any);
+    assert.deepEqual(errors, []);
+  });
+
+  it('falls back to item key when no database column source exists', () => {
+    const validations = [{
+      VALIDATION_NAME: 'V4',
+      VALIDATION_TYPE: 'Item\\Column Specified Is Not Null',
+      VALIDATION_EXPRESSION1: 'P4_TX_CUSTOM',
+      VALIDATION_FAILURE_TEXT: 'Campo custom obrigatorio',
+      REGION_SEQUENCE: 1,
+      VALIDATION_SEQUENCE: 4,
+      CONDITION_TYPE: '',
+      CONDITION_EXPRESSION1: '',
+      CONDITION_EXPRESSION2: '',
+    }];
+
+    const endpointItems = [{
+      ITEM_SEQUENCE: 170,
+      REGION_SEQUENCE: 10,
+      IS_REQUIRED: 'No',
+      DISPLAY_AS: 'Text Field',
+      ITEM_SOURCE: undefined,
+      LABEL: 'Custom',
+      ITEM_SOURCE_TYPE: 'Always, replacing any existing value in session state',
+      REGION: 'Infos basicas',
+      ITEM_NAME: 'P4_TX_CUSTOM',
+    }];
+
+    const errors = validateEndpointPayload({ TX_CUSTOM: '' }, validations as any, endpointItems as any);
+    assert.ok(errors.includes('Campo custom obrigatorio'));
   });
 });
 

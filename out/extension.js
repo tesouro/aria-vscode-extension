@@ -45,6 +45,48 @@ function mergePreservingTypes(original, updates) {
     }
     return result;
 }
+function coerceEmptyStringsToNullForEndpoint(obj) {
+    if (!obj || typeof obj !== 'object') {
+        return;
+    }
+    const keysToNullify = ['IN_TIPO_CACHE', 'NR_TIPO_CACHE'];
+    for (const k of keysToNullify) {
+        if (Object.prototype.hasOwnProperty.call(obj, k)) {
+            const v = obj[k];
+            if (v === '' || (typeof v === 'string' && v.trim() === '')) {
+                obj[k] = null;
+            }
+        }
+    }
+}
+function normalizeEmptyStringsToNull(obj) {
+    if (obj === null || obj === undefined) {
+        return;
+    }
+    if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+            const v = obj[i];
+            if (v === '' || (typeof v === 'string' && v.trim() === '')) {
+                obj[i] = null;
+            }
+            else if (typeof v === 'object' && v !== null) {
+                normalizeEmptyStringsToNull(v);
+            }
+        }
+        return;
+    }
+    if (typeof obj === 'object') {
+        for (const k of Object.keys(obj)) {
+            const v = obj[k];
+            if (v === '' || (typeof v === 'string' && v.trim() === '')) {
+                obj[k] = null;
+            }
+            else if (typeof v === 'object' && v !== null) {
+                normalizeEmptyStringsToNull(v);
+            }
+        }
+    }
+}
 function isValidateCodeSuccess(status) {
     const s = (0, utils_1.toStringSafe)(status).toLowerCase().trim();
     return s === 'sucesso' || s === 'ok' || s === 'success';
@@ -639,6 +681,7 @@ function activate(context) {
             throw new Error(`Esperado 1 projeto, retornados ${freshDataset.registros.length}.`);
         }
         const draftProject = freshDataset.registros[0];
+        const previousEndpointIds = new Set((draftProject.REST_CUSTOM || []).map((e) => Number(e.ID_REST_CUSTOM)));
         for (const ep of draftProject.REST_CUSTOM ?? []) {
             ep.SN_MODO_COMPATIBILIDADE = 'N';
             if (ep.IN_TIPO_TRANSFORMACAO === '') {
@@ -664,12 +707,30 @@ function activate(context) {
                 await validateEndpointCodeBeforeSave(ep);
             }
         }
-        const payloadStr = JSON.stringify(freshDataset, null, 2);
+        // Build payload: for endpoint edits, send the full project JSON but include only the edited endpoint(s)
+        let payloadToSend = { ...freshDataset };
+        // shallow clone registros and project so we can modify REST_CUSTOM without altering draft
+        payloadToSend = { registros: [{ ...draftProject }] };
+        if (source.startsWith('endpointCode:') || source.startsWith('endpointJson:') || source.startsWith('endpointYaml:') || source.startsWith('endpointToml:') || source.startsWith('endpointForm:')) {
+            const endpointId = Number(source.split(':')[1]);
+            payloadToSend.registros[0].REST_CUSTOM = (draftProject.REST_CUSTOM || []).filter((e) => Number(e.ID_REST_CUSTOM) === endpointId);
+        }
+        else if (source.startsWith('createEndpoint:')) {
+            // include only newly created endpoints (those with IDs not present before)
+            payloadToSend.registros[0].REST_CUSTOM = (draftProject.REST_CUSTOM || []).filter((e) => !previousEndpointIds.has(Number(e.ID_REST_CUSTOM)));
+        }
+        else {
+            // project-level edits: keep all endpoints
+            payloadToSend.registros[0].REST_CUSTOM = draftProject.REST_CUSTOM;
+        }
+        // convert all empty strings to null per requirement
+        normalizeEmptyStringsToNull(payloadToSend);
+        const payloadStr = JSON.stringify(payloadToSend, null, 2);
         const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
         await fs.promises.writeFile(filePath, payloadStr, 'utf8');
         state.lastPayloadPath = filePath;
         output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
-        await client.saveDataset(freshDataset);
+        await client.saveDataset(payloadToSend);
         state.dataset = await client.getProjectEndpointTree();
         tree.refresh();
     };
@@ -685,12 +746,15 @@ function activate(context) {
             }
         }
         await mutate(freshDataset);
-        const payloadStr = JSON.stringify(freshDataset, null, 2);
+        // prepare a deep copy and normalize empty strings to null for sending
+        const copyForSend = JSON.parse(JSON.stringify(freshDataset));
+        normalizeEmptyStringsToNull(copyForSend);
+        const payloadStr = JSON.stringify(copyForSend, null, 2);
         const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
         await fs.promises.writeFile(filePath, payloadStr, 'utf8');
         state.lastPayloadPath = filePath;
         output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
-        await client.saveDataset(freshDataset);
+        await client.saveDataset(copyForSend);
         state.dataset = await client.getProjectEndpointTree();
         tree.refresh();
     };
@@ -705,12 +769,14 @@ function activate(context) {
             throw new Error(`Ja existe projeto com TX_PATH "${(0, utils_1.toStringSafe)(projectPayload.TX_PATH).trim()}".`);
         }
         const wrappedPayload = { registros: [projectPayload] };
-        const payloadStr = JSON.stringify(wrappedPayload, null, 2);
+        const copyForSend = JSON.parse(JSON.stringify(wrappedPayload));
+        normalizeEmptyStringsToNull(copyForSend);
+        const payloadStr = JSON.stringify(copyForSend, null, 2);
         const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
         await fs.promises.writeFile(filePath, payloadStr, 'utf8');
         state.lastPayloadPath = filePath;
         output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
-        await client.saveProject(projectPayload);
+        await client.saveProject(copyForSend.registros[0]);
         state.dataset = await client.getProjectEndpointTree();
         tree.refresh();
     };
@@ -1049,7 +1115,8 @@ function activate(context) {
                     const idx = p.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
                     if (idx >= 0) {
                         const merged = mergePreservingTypes(p.REST_CUSTOM[idx], normalized);
-                        const errors = (0, endpoint_validator_1.validateEndpointPayload)(merged, endpointValidations);
+                        coerceEmptyStringsToNullForEndpoint(merged);
+                        const errors = (0, endpoint_validator_1.validateEndpointPayload)(merged, endpointValidations, endpointFormItems);
                         if (errors.length) {
                             throw new Error(errors.join(' | '));
                         }
@@ -1133,7 +1200,7 @@ function activate(context) {
                     throw new Error('Projeto nao encontrado.');
                 }
                 const newEp = (0, endpoint_normalizer_1.buildEndpointFromExampleStructure)(proj, normalized, lovs);
-                const errors = (0, endpoint_validator_1.validateEndpointPayload)(newEp, endpointValidations);
+                const errors = (0, endpoint_validator_1.validateEndpointPayload)(newEp, endpointValidations, endpointFormItems);
                 if (errors.length) {
                     throw new Error(errors.join(' | '));
                 }

@@ -430,7 +430,28 @@ export function registerTools(
 
           // Simplified: delegate to importar-json endpoint directly
           const client = state.getClient();
-          await client.saveDataset(inputPayloadRaw as any);
+          const copyForSend = JSON.parse(JSON.stringify(inputPayloadRaw));
+          // normalize empty strings to null before sending
+          const normalizeEmptyStringsToNull = (obj: unknown): void => {
+            if (obj === null || obj === undefined) { return; }
+            if (Array.isArray(obj)) {
+              for (let i = 0; i < obj.length; i++) {
+                const v = obj[i];
+                if (v === '' || (typeof v === 'string' && v.trim() === '')) { obj[i] = null; }
+                else if (typeof v === 'object' && v !== null) { normalizeEmptyStringsToNull(v); }
+              }
+              return;
+            }
+            if (typeof obj === 'object') {
+              for (const k of Object.keys(obj as Record<string, unknown>)) {
+                const v = (obj as Record<string, unknown>)[k];
+                if (v === '' || (typeof v === 'string' && v.trim() === '')) { (obj as Record<string, unknown>)[k] = null; }
+                else if (typeof v === 'object' && v !== null) { normalizeEmptyStringsToNull(v); }
+              }
+            }
+          };
+          normalizeEmptyStringsToNull(copyForSend);
+          await client.saveDataset(copyForSend as any);
           state.dataset = await client.getProjectEndpointTree();
           return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('JSON importado com sucesso. Arvore atualizada.')]);
         } catch (error) {

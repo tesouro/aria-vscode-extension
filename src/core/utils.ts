@@ -124,7 +124,7 @@ export function normalizeEndpointPath(value: unknown): string {
 }
 
 export function normalizeEndpointFieldKey(itemName: string): string {
-  return itemName.replace(/^P\d+_/, '').trim().toUpperCase();
+  return itemName.replace(/^P\d+_/i, '').trim().toUpperCase();
 }
 
 export function buildMetadataKey(idBancoExterno: number, idBancoEsquema?: number): string {

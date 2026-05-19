@@ -42,11 +42,23 @@ export class AriaApiClient {
   }
 
   async saveDataset(dataset: AriaDataset): Promise<void> {
-    await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
+    const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
+    const root = asRecord(response) || {};
+    if (typeof root.status === 'string' && root.status.toLowerCase() === 'erro') {
+      const codigo = root.codigo != null ? toStringSafe(root.codigo) : undefined;
+      const mensagem = typeof root.mensagem === 'string' ? root.mensagem : undefined;
+      throw new Error(`Importar JSON falhou${codigo ? ` (codigo ${codigo})` : ''}${mensagem ? `: ${mensagem}` : ''}`);
+    }
   }
 
   async saveProject(project: Record<string, unknown>): Promise<void> {
-    await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, { registros: [project] });
+    const response = await this.request<unknown>('POST', '/v1/aria-vscode/custom/importar-json', undefined, { registros: [project] });
+    const root = asRecord(response) || {};
+    if (typeof root.status === 'string' && root.status.toLowerCase() === 'erro') {
+      const codigo = root.codigo != null ? toStringSafe(root.codigo) : undefined;
+      const mensagem = typeof root.mensagem === 'string' ? root.mensagem : undefined;
+      throw new Error(`Importar JSON falhou${codigo ? ` (codigo ${codigo})` : ''}${mensagem ? `: ${mensagem}` : ''}`);
+    }
   }
 
   async importarJsonEndpoint(projectId: number, endpointJson: unknown): Promise<{ status?: string; mensagem?: string }> {

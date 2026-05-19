@@ -44,6 +44,38 @@ function mergePreservingTypes(original: Record<string, unknown>, updates: Record
   return result;
 }
 
+function coerceEmptyStringsToNullForEndpoint(obj: Record<string, unknown>): void {
+  if (!obj || typeof obj !== 'object') { return; }
+  const keysToNullify = ['IN_TIPO_CACHE', 'NR_TIPO_CACHE'];
+  for (const k of keysToNullify) {
+    if (Object.prototype.hasOwnProperty.call(obj, k)) {
+      const v = obj[k];
+      if (v === '' || (typeof v === 'string' && v.trim() === '')) {
+        obj[k] = null;
+      }
+    }
+  }
+}
+
+function normalizeEmptyStringsToNull(obj: unknown): void {
+  if (obj === null || obj === undefined) { return; }
+  if (Array.isArray(obj)) {
+    for (let i = 0; i < obj.length; i++) {
+      const v = obj[i];
+      if (v === '' || (typeof v === 'string' && v.trim() === '')) { obj[i] = null; }
+      else if (typeof v === 'object' && v !== null) { normalizeEmptyStringsToNull(v); }
+    }
+    return;
+  }
+  if (typeof obj === 'object') {
+    for (const k of Object.keys(obj as Record<string, unknown>)) {
+      const v = (obj as Record<string, unknown>)[k];
+      if (v === '' || (typeof v === 'string' && v.trim() === '')) { (obj as Record<string, unknown>)[k] = null; }
+      else if (typeof v === 'object' && v !== null) { normalizeEmptyStringsToNull(v); }
+    }
+  }
+}
+
 function isValidateCodeSuccess(status: unknown): boolean {
   const s = toStringSafe(status).toLowerCase().trim();
   return s === 'sucesso' || s === 'ok' || s === 'success';
@@ -656,6 +688,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const freshDataset = await client.getDatasetByProjectId(projectId);
     if (freshDataset.registros.length !== 1) { throw new Error(`Esperado 1 projeto, retornados ${freshDataset.registros.length}.`); }
     const draftProject = freshDataset.registros[0];
+    const previousEndpointIds = new Set<number>((draftProject.REST_CUSTOM || []).map((e) => Number(e.ID_REST_CUSTOM)));
     for (const ep of draftProject.REST_CUSTOM ?? []) {
       ep.SN_MODO_COMPATIBILIDADE = 'N';
       if (ep.IN_TIPO_TRANSFORMACAO === '') { ep.IN_TIPO_TRANSFORMACAO = null; }
@@ -680,13 +713,32 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
 
-    const payloadStr = JSON.stringify(freshDataset, null, 2);
+    // Build payload: for endpoint edits, send the full project JSON but include only the edited endpoint(s)
+    let payloadToSend = { ...freshDataset } as typeof freshDataset;
+    // shallow clone registros and project so we can modify REST_CUSTOM without altering draft
+    payloadToSend = { registros: [ { ...draftProject } ] } as typeof freshDataset;
+
+    if (source.startsWith('endpointCode:') || source.startsWith('endpointJson:') || source.startsWith('endpointYaml:') || source.startsWith('endpointToml:') || source.startsWith('endpointForm:')) {
+      const endpointId = Number(source.split(':')[1]);
+      payloadToSend.registros[0].REST_CUSTOM = (draftProject.REST_CUSTOM || []).filter((e) => Number(e.ID_REST_CUSTOM) === endpointId);
+    } else if (source.startsWith('createEndpoint:')) {
+      // include only newly created endpoints (those with IDs not present before)
+      payloadToSend.registros[0].REST_CUSTOM = (draftProject.REST_CUSTOM || []).filter((e) => !previousEndpointIds.has(Number(e.ID_REST_CUSTOM)));
+    } else {
+      // project-level edits: keep all endpoints
+      payloadToSend.registros[0].REST_CUSTOM = draftProject.REST_CUSTOM;
+    }
+
+    // convert all empty strings to null per requirement
+    normalizeEmptyStringsToNull(payloadToSend);
+
+    const payloadStr = JSON.stringify(payloadToSend, null, 2);
     const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
     await fs.promises.writeFile(filePath, payloadStr, 'utf8');
     state.lastPayloadPath = filePath;
     output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
 
-    await client.saveDataset(freshDataset);
+    await client.saveDataset(payloadToSend);
     state.dataset = await client.getProjectEndpointTree();
     tree.refresh();
   };
@@ -706,13 +758,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
     await mutate(freshDataset);
 
-    const payloadStr = JSON.stringify(freshDataset, null, 2);
+    // prepare a deep copy and normalize empty strings to null for sending
+    const copyForSend = JSON.parse(JSON.stringify(freshDataset));
+    normalizeEmptyStringsToNull(copyForSend);
+    const payloadStr = JSON.stringify(copyForSend, null, 2);
     const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
     await fs.promises.writeFile(filePath, payloadStr, 'utf8');
     state.lastPayloadPath = filePath;
     output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
 
-    await client.saveDataset(freshDataset);
+    await client.saveDataset(copyForSend as any);
     state.dataset = await client.getProjectEndpointTree();
     tree.refresh();
   };
@@ -730,13 +785,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     const wrappedPayload = { registros: [projectPayload] };
-    const payloadStr = JSON.stringify(wrappedPayload, null, 2);
+    const copyForSend = JSON.parse(JSON.stringify(wrappedPayload));
+    normalizeEmptyStringsToNull(copyForSend);
+    const payloadStr = JSON.stringify(copyForSend, null, 2);
     const filePath = await ensureEditFilePath('last-importa-json.aria.payload.json');
     await fs.promises.writeFile(filePath, payloadStr, 'utf8');
     state.lastPayloadPath = filePath;
     output.appendLine(`[${new Date().toISOString()}] Payload preparado: ${source}, ${payloadStr.length} bytes`);
 
-    await client.saveProject(projectPayload);
+    await client.saveProject(copyForSend.registros[0] as any);
     state.dataset = await client.getProjectEndpointTree();
     tree.refresh();
   };
@@ -1023,7 +1080,8 @@ export function activate(context: vscode.ExtensionContext): void {
             const idx = p.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
             if (idx >= 0) {
               const merged = mergePreservingTypes(p.REST_CUSTOM[idx] as Record<string, unknown>, normalized);
-              const errors = validateEndpointPayload(merged, endpointValidations);
+              coerceEmptyStringsToNullForEndpoint(merged);
+              const errors = validateEndpointPayload(merged, endpointValidations, endpointFormItems);
               if (errors.length) { throw new Error(errors.join(' | ')); }
               p.REST_CUSTOM[idx] = merged as AriaEndpoint;
               return;
@@ -1088,7 +1146,7 @@ export function activate(context: vscode.ExtensionContext): void {
           const proj = draft.registros.find((p) => p.ID_PROJETO === targetProjectId);
           if (!proj) { throw new Error('Projeto nao encontrado.'); }
           const newEp = buildEndpointFromExampleStructure(proj, normalized, lovs);
-          const errors = validateEndpointPayload(newEp, endpointValidations);
+          const errors = validateEndpointPayload(newEp, endpointValidations, endpointFormItems);
           if (errors.length) { throw new Error(errors.join(' | ')); }
           proj.REST_CUSTOM.push(newEp as AriaEndpoint);
         });

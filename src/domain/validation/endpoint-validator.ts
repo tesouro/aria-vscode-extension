@@ -1,11 +1,13 @@
-import type { EndpointValidationItem } from '../../core/types';
+import type { EndpointFormItem, EndpointValidationItem } from '../../core/types';
 import { toNumber, toStringSafe, normalizeEndpointFieldKey } from '../../core/utils';
 
 export function validateEndpointPayload(
   payload: Record<string, unknown>,
-  validations?: EndpointValidationItem[]
+  validations?: EndpointValidationItem[],
+  endpointItems?: EndpointFormItem[]
 ): string[] {
   if (!validations?.length) { return []; }
+  const resolveFieldKey = buildEndpointFieldKeyResolver(endpointItems);
 
   const sorted = validations.slice().sort((a, b) => {
     const regionDiff = a.REGION_SEQUENCE - b.REGION_SEQUENCE;
@@ -14,19 +16,19 @@ export function validateEndpointPayload(
 
   const errors: string[] = [];
   for (const validation of sorted) {
-    if (!shouldApplyValidationCondition(validation, payload)) { continue; }
+    if (!shouldApplyValidationCondition(validation, payload, resolveFieldKey)) { continue; }
     const type = (validation.VALIDATION_TYPE || '').toLowerCase();
     const failMessage = validation.VALIDATION_FAILURE_TEXT?.trim() || `${validation.VALIDATION_NAME} invalida.`;
 
     if (type.includes('item\\column specified is not null')) {
-      const field = normalizeEndpointFieldKey(validation.VALIDATION_EXPRESSION1 || '');
+      const field = resolveFieldKey(validation.VALIDATION_EXPRESSION1 || '');
       if (field && isMissingRequiredField(field, payload[field])) { errors.push(failMessage); }
       continue;
     }
 
     if (type.includes('pl/sql expression')) {
       const expression = validation.VALIDATION_EXPRESSION1 || '';
-      const valid = evaluateSimplePlsqlExpression(expression, payload);
+      const valid = evaluateSimplePlsqlExpression(expression, payload, resolveFieldKey);
       if (valid === false) { errors.push(failMessage); }
       continue;
     }
@@ -41,7 +43,38 @@ export function validateEndpointPayload(
       }
     }
   }
+
   return errors;
+}
+
+function buildEndpointFieldKeyResolver(endpointItems?: EndpointFormItem[]): (rawField: string) => string {
+  if (!endpointItems?.length) {
+    return (rawField: string) => normalizeEndpointFieldKey(rawField || '');
+  }
+
+  const itemByName = new Map<string, EndpointFormItem>();
+  for (const item of endpointItems) {
+    const key = normalizeEndpointFieldKey(item.ITEM_NAME || '');
+    if (key && !itemByName.has(key)) {
+      itemByName.set(key, item);
+    }
+  }
+
+  return (rawField: string) => {
+    const normalizedRaw = normalizeEndpointFieldKey(rawField || '');
+    if (!normalizedRaw) { return ''; }
+
+    const item = itemByName.get(normalizedRaw);
+    if (!item) { return normalizedRaw; }
+
+    const sourceType = toStringSafe(item.ITEM_SOURCE_TYPE).trim().toLowerCase();
+    const itemSource = toStringSafe(item.ITEM_SOURCE).trim();
+    if (itemSource && sourceType.includes('database column')) {
+      return normalizeEndpointFieldKey(itemSource);
+    }
+
+    return normalizeEndpointFieldKey(item.ITEM_NAME);
+  };
 }
 
 export function isMissingRequiredField(fieldName: string, value: unknown): boolean {
@@ -70,20 +103,22 @@ export function buildRequiredEndpointFieldKeys(items?: { IS_REQUIRED: string; DI
   return Array.from(new Set(required)).filter(Boolean);
 }
 
-function shouldApplyValidationCondition(validation: EndpointValidationItem, payload: Record<string, unknown>): boolean {
+function shouldApplyValidationCondition(
+  validation: EndpointValidationItem,
+  payload: Record<string, unknown>,
+  resolveFieldKey: (rawField: string) => string
+): boolean {
   const conditionType = (validation.CONDITION_TYPE || '').trim().toLowerCase();
   if (!conditionType) { return true; }
   if (conditionType === 'never') { return false; }
   if (conditionType.includes('value of item in expression 1 = expression 2')) {
-    const leftKey = normalizeEndpointFieldKey(validation.CONDITION_EXPRESSION1 || '');
+    const leftKey = resolveFieldKey(validation.CONDITION_EXPRESSION1 || '');
     const rightRaw = toStringSafe(validation.CONDITION_EXPRESSION2 || '').trim();
     if (!leftKey) { return true; }
     return toStringSafe(payload[leftKey]).trim() === rightRaw;
   }
   return true;
 }
-
-// ─── Simple PL/SQL expression evaluator ──────────────────────────────────────
 
 type SimpleToken =
   | { type: 'item'; value: string }
@@ -92,7 +127,10 @@ type SimpleToken =
   | { type: 'string'; value: string }
   | { type: 'symbol'; value: '(' | ')' | '=' };
 
-function tokenizeSimplePlsqlExpression(input: string): SimpleToken[] | undefined {
+function tokenizeSimplePlsqlExpression(
+  input: string,
+  resolveFieldKey: (rawField: string) => string
+): SimpleToken[] | undefined {
   const tokens: SimpleToken[] = [];
   let index = 0;
   while (index < input.length) {
@@ -105,7 +143,7 @@ function tokenizeSimplePlsqlExpression(input: string): SimpleToken[] | undefined
     if (current === ':') {
       let end = index + 1;
       while (end < input.length && /[A-Za-z0-9_]/.test(input[end])) { end++; }
-      tokens.push({ type: 'item', value: normalizeEndpointFieldKey(input.slice(index + 1, end)) });
+      tokens.push({ type: 'item', value: resolveFieldKey(input.slice(index + 1, end)) });
       index = end; continue;
     }
     if (current === '\'') {
@@ -132,10 +170,16 @@ function tokenizeSimplePlsqlExpression(input: string): SimpleToken[] | undefined
   return tokens;
 }
 
-export function evaluateSimplePlsqlExpression(expression: string, payload: Record<string, unknown>): boolean | undefined {
+export function evaluateSimplePlsqlExpression(
+  expression: string,
+  payload: Record<string, unknown>,
+  resolveFieldKey?: (rawField: string) => string
+): boolean | undefined {
+  const resolver = resolveFieldKey ?? normalizeEndpointFieldKey;
   const trimmed = expression.trim();
   if (!trimmed) { return undefined; }
-  const tokens = tokenizeSimplePlsqlExpression(trimmed);
+
+  const tokens = tokenizeSimplePlsqlExpression(trimmed, resolver);
   if (!tokens) { return undefined; }
 
   let idx = 0;
@@ -156,16 +200,19 @@ export function evaluateSimplePlsqlExpression(expression: string, payload: Recor
     idx++;
     const next = tokens[idx];
     if (!next) { return undefined; }
+
     if (next.type === 'word' && next.value === 'is') {
       idx++;
       let isNot = false;
       if (tokens[idx]?.type === 'word' && tokens[idx]?.value === 'not') { isNot = true; idx++; }
       if (!tokens[idx] || tokens[idx].type !== 'word' || tokens[idx].value !== 'null') { return undefined; }
       idx++;
+
       const value = payload[leftKey];
       const isNull = value === null || value === undefined || String(value).trim() === '';
       return isNot ? !isNull : isNull;
     }
+
     if (next.type === 'symbol' && next.value === '=') {
       idx++;
       const rightValue = parseValue();
@@ -173,6 +220,7 @@ export function evaluateSimplePlsqlExpression(expression: string, payload: Recor
       if (typeof rightValue === 'number') { return toNumber(leftValue) === rightValue; }
       return toStringSafe(leftValue).trim() === toStringSafe(rightValue).trim();
     }
+
     return undefined;
   };
 

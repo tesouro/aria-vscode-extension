@@ -141,7 +141,7 @@ function normalizeEndpointPath(value) {
     return toStringSafe(value).trim().replace(/^\/+/, '');
 }
 function normalizeEndpointFieldKey(itemName) {
-    return itemName.replace(/^P\d+_/, '').trim().toUpperCase();
+    return itemName.replace(/^P\d+_/i, '').trim().toUpperCase();
 }
 function buildMetadataKey(idBancoExterno, idBancoEsquema) {
     return (idBancoEsquema && idBancoEsquema > 0)

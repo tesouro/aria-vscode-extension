@@ -5,23 +5,24 @@ exports.isMissingRequiredField = isMissingRequiredField;
 exports.buildRequiredEndpointFieldKeys = buildRequiredEndpointFieldKeys;
 exports.evaluateSimplePlsqlExpression = evaluateSimplePlsqlExpression;
 const utils_1 = require("../../core/utils");
-function validateEndpointPayload(payload, validations) {
+function validateEndpointPayload(payload, validations, endpointItems) {
     if (!validations?.length) {
         return [];
     }
+    const resolveFieldKey = buildEndpointFieldKeyResolver(endpointItems);
     const sorted = validations.slice().sort((a, b) => {
         const regionDiff = a.REGION_SEQUENCE - b.REGION_SEQUENCE;
         return regionDiff !== 0 ? regionDiff : a.VALIDATION_SEQUENCE - b.VALIDATION_SEQUENCE;
     });
     const errors = [];
     for (const validation of sorted) {
-        if (!shouldApplyValidationCondition(validation, payload)) {
+        if (!shouldApplyValidationCondition(validation, payload, resolveFieldKey)) {
             continue;
         }
         const type = (validation.VALIDATION_TYPE || '').toLowerCase();
         const failMessage = validation.VALIDATION_FAILURE_TEXT?.trim() || `${validation.VALIDATION_NAME} invalida.`;
         if (type.includes('item\\column specified is not null')) {
-            const field = (0, utils_1.normalizeEndpointFieldKey)(validation.VALIDATION_EXPRESSION1 || '');
+            const field = resolveFieldKey(validation.VALIDATION_EXPRESSION1 || '');
             if (field && isMissingRequiredField(field, payload[field])) {
                 errors.push(failMessage);
             }
@@ -29,7 +30,7 @@ function validateEndpointPayload(payload, validations) {
         }
         if (type.includes('pl/sql expression')) {
             const expression = validation.VALIDATION_EXPRESSION1 || '';
-            const valid = evaluateSimplePlsqlExpression(expression, payload);
+            const valid = evaluateSimplePlsqlExpression(expression, payload, resolveFieldKey);
             if (valid === false) {
                 errors.push(failMessage);
             }
@@ -46,6 +47,34 @@ function validateEndpointPayload(payload, validations) {
         }
     }
     return errors;
+}
+function buildEndpointFieldKeyResolver(endpointItems) {
+    if (!endpointItems?.length) {
+        return (rawField) => (0, utils_1.normalizeEndpointFieldKey)(rawField || '');
+    }
+    const itemByName = new Map();
+    for (const item of endpointItems) {
+        const key = (0, utils_1.normalizeEndpointFieldKey)(item.ITEM_NAME || '');
+        if (key && !itemByName.has(key)) {
+            itemByName.set(key, item);
+        }
+    }
+    return (rawField) => {
+        const normalizedRaw = (0, utils_1.normalizeEndpointFieldKey)(rawField || '');
+        if (!normalizedRaw) {
+            return '';
+        }
+        const item = itemByName.get(normalizedRaw);
+        if (!item) {
+            return normalizedRaw;
+        }
+        const sourceType = (0, utils_1.toStringSafe)(item.ITEM_SOURCE_TYPE).trim().toLowerCase();
+        const itemSource = (0, utils_1.toStringSafe)(item.ITEM_SOURCE).trim();
+        if (itemSource && sourceType.includes('database column')) {
+            return (0, utils_1.normalizeEndpointFieldKey)(itemSource);
+        }
+        return (0, utils_1.normalizeEndpointFieldKey)(item.ITEM_NAME);
+    };
 }
 function isMissingRequiredField(fieldName, value) {
     if (value === null || value === undefined) {
@@ -79,7 +108,7 @@ function buildRequiredEndpointFieldKeys(items) {
     });
     return Array.from(new Set(required)).filter(Boolean);
 }
-function shouldApplyValidationCondition(validation, payload) {
+function shouldApplyValidationCondition(validation, payload, resolveFieldKey) {
     const conditionType = (validation.CONDITION_TYPE || '').trim().toLowerCase();
     if (!conditionType) {
         return true;
@@ -88,7 +117,7 @@ function shouldApplyValidationCondition(validation, payload) {
         return false;
     }
     if (conditionType.includes('value of item in expression 1 = expression 2')) {
-        const leftKey = (0, utils_1.normalizeEndpointFieldKey)(validation.CONDITION_EXPRESSION1 || '');
+        const leftKey = resolveFieldKey(validation.CONDITION_EXPRESSION1 || '');
         const rightRaw = (0, utils_1.toStringSafe)(validation.CONDITION_EXPRESSION2 || '').trim();
         if (!leftKey) {
             return true;
@@ -97,7 +126,7 @@ function shouldApplyValidationCondition(validation, payload) {
     }
     return true;
 }
-function tokenizeSimplePlsqlExpression(input) {
+function tokenizeSimplePlsqlExpression(input, resolveFieldKey) {
     const tokens = [];
     let index = 0;
     while (index < input.length) {
@@ -116,7 +145,7 @@ function tokenizeSimplePlsqlExpression(input) {
             while (end < input.length && /[A-Za-z0-9_]/.test(input[end])) {
                 end++;
             }
-            tokens.push({ type: 'item', value: (0, utils_1.normalizeEndpointFieldKey)(input.slice(index + 1, end)) });
+            tokens.push({ type: 'item', value: resolveFieldKey(input.slice(index + 1, end)) });
             index = end;
             continue;
         }
@@ -154,12 +183,13 @@ function tokenizeSimplePlsqlExpression(input) {
     }
     return tokens;
 }
-function evaluateSimplePlsqlExpression(expression, payload) {
+function evaluateSimplePlsqlExpression(expression, payload, resolveFieldKey) {
+    const resolver = resolveFieldKey ?? utils_1.normalizeEndpointFieldKey;
     const trimmed = expression.trim();
     if (!trimmed) {
         return undefined;
     }
-    const tokens = tokenizeSimplePlsqlExpression(trimmed);
+    const tokens = tokenizeSimplePlsqlExpression(trimmed, resolver);
     if (!tokens) {
         return undefined;
     }

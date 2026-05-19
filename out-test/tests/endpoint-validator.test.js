@@ -50,6 +50,13 @@ const endpoint_validator_1 = require("../domain/validation/endpoint-validator");
     (0, node_test_1.it)('evaluates OR', () => {
         assert.equal((0, endpoint_validator_1.evaluateSimplePlsqlExpression)(":A is null or :B = 1", { A: null, B: 0 }), true);
     });
+    (0, node_test_1.it)('normalizes lowercase APEX item bind variables', () => {
+        assert.equal((0, endpoint_validator_1.evaluateSimplePlsqlExpression)(':p4_tx_mime_type is not null or :p4_id_tipo_codigo = 1 or :p4_id_tipo_header = 2', {
+            TX_MIME_TYPE: 'application/json',
+            ID_TIPO_CODIGO: 0,
+            ID_TIPO_HEADER: 0,
+        }), true);
+    });
     (0, node_test_1.it)('returns undefined for empty', () => {
         assert.equal((0, endpoint_validator_1.evaluateSimplePlsqlExpression)('', {}), undefined);
     });
@@ -91,6 +98,58 @@ const endpoint_validator_1 = require("../domain/validation/endpoint-validator");
             }];
         const errors = (0, endpoint_validator_1.validateEndpointPayload)({ TX_PATH: '' }, validations);
         assert.ok(!errors.includes('Path obrigatorio'));
+    });
+    (0, node_test_1.it)('resolves ITEM_NAME to ITEM_SOURCE for not-null validation', () => {
+        const validations = [{
+                VALIDATION_NAME: 'V3',
+                VALIDATION_TYPE: 'Item\\Column Specified Is Not Null',
+                VALIDATION_EXPRESSION1: 'p4_tx_mime_header',
+                VALIDATION_FAILURE_TEXT: 'Mime-Type obrigatorio',
+                REGION_SEQUENCE: 1,
+                VALIDATION_SEQUENCE: 3,
+                CONDITION_TYPE: '',
+                CONDITION_EXPRESSION1: '',
+                CONDITION_EXPRESSION2: '',
+            }];
+        const endpointItems = [{
+                ITEM_SEQUENCE: 160,
+                REGION_SEQUENCE: 10,
+                IS_REQUIRED: 'No',
+                DISPLAY_AS: 'Text Field',
+                ITEM_SOURCE: 'TX_MIME_TYPE',
+                LABEL: 'Mime-Type Header',
+                ITEM_SOURCE_TYPE: 'Database Column',
+                REGION: 'Infos basicas',
+                ITEM_NAME: 'P4_TX_MIME_HEADER',
+            }];
+        const errors = (0, endpoint_validator_1.validateEndpointPayload)({ TX_MIME_TYPE: 'application/json' }, validations, endpointItems);
+        assert.deepEqual(errors, []);
+    });
+    (0, node_test_1.it)('falls back to item key when no database column source exists', () => {
+        const validations = [{
+                VALIDATION_NAME: 'V4',
+                VALIDATION_TYPE: 'Item\\Column Specified Is Not Null',
+                VALIDATION_EXPRESSION1: 'P4_TX_CUSTOM',
+                VALIDATION_FAILURE_TEXT: 'Campo custom obrigatorio',
+                REGION_SEQUENCE: 1,
+                VALIDATION_SEQUENCE: 4,
+                CONDITION_TYPE: '',
+                CONDITION_EXPRESSION1: '',
+                CONDITION_EXPRESSION2: '',
+            }];
+        const endpointItems = [{
+                ITEM_SEQUENCE: 170,
+                REGION_SEQUENCE: 10,
+                IS_REQUIRED: 'No',
+                DISPLAY_AS: 'Text Field',
+                ITEM_SOURCE: undefined,
+                LABEL: 'Custom',
+                ITEM_SOURCE_TYPE: 'Always, replacing any existing value in session state',
+                REGION: 'Infos basicas',
+                ITEM_NAME: 'P4_TX_CUSTOM',
+            }];
+        const errors = (0, endpoint_validator_1.validateEndpointPayload)({ TX_CUSTOM: '' }, validations, endpointItems);
+        assert.ok(errors.includes('Campo custom obrigatorio'));
     });
 });
 (0, node_test_1.describe)('isMissingRequiredField – additional edge cases', () => {
