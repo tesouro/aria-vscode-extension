@@ -4,12 +4,12 @@
     "target": "ES2022",
     "outDir": "out-test",
     "lib": ["ES2022"],
-    "types": ["node"],
+    "types": ["node", "vscode"],
     "sourceMap": false,
     "rootDir": "src",
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/tests", "src/core", "src/domain"],
+  "include": ["src/tests", "src/core", "src/domain", "src/infrastructure", "src/vscode"],
   "exclude": ["node_modules"]
 }

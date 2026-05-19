@@ -630,7 +630,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "tsc -p tsconfig.test.json && node --test out-test/tests/*.test.js"
+    "test": "tsc -p tsconfig.test.json && node --require ./out-test/tests/vscode-mock.js --test out-test/tests/*.test.js"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

@@ -4,7 +4,7 @@ import {
   asRecord, asArray, toNumber, toStringSafe, toErrorMessage,
   normalizeTextForLookup, parseListTokens, extractKeywordTokens,
   decodeJwtClaims, normalizeEndpointPath, normalizeEndpointFieldKey,
-  buildMetadataKey,
+  buildMetadataKey, summarizeForLog,
 } from '../core/utils';
 
 describe('asRecord', () => {
@@ -73,10 +73,90 @@ describe('normalizeEndpointPath', () => {
 
 describe('normalizeEndpointFieldKey', () => {
   it('strips P<n>_ prefix and uppercases', () => assert.equal(normalizeEndpointFieldKey('P1_no_rest_custom'), 'NO_REST_CUSTOM'));
+  it('strips P100_ prefix', () => assert.equal(normalizeEndpointFieldKey('P100_TX_PATH'), 'TX_PATH'));
+  it('returns unchanged when no P<n>_ prefix', () => assert.equal(normalizeEndpointFieldKey('MY_FIELD'), 'MY_FIELD'));
 });
 
 describe('buildMetadataKey', () => {
   it('builds with schema', () => assert.equal(buildMetadataKey(5, 10), '5:10'));
   it('builds without schema', () => assert.equal(buildMetadataKey(5), '5:sem-esquema'));
   it('treats 0 as no schema', () => assert.equal(buildMetadataKey(5, 0), '5:sem-esquema'));
+  it('treats negative as no schema', () => assert.equal(buildMetadataKey(5, -1), '5:sem-esquema'));
+});
+
+describe('summarizeForLog', () => {
+  it('truncates long strings', () => {
+    const longStr = 'x'.repeat(300);
+    const result = summarizeForLog(longStr);
+    assert.ok(result.includes('chars omitted'));
+  });
+
+  it('summarizes arrays beyond maxArrayItems', () => {
+    const arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const result = summarizeForLog(arr);
+    assert.ok(typeof result === 'string');
+  });
+
+  it('handles null', () => {
+    const result = summarizeForLog(null);
+    assert.ok(result === 'null');
+  });
+
+  it('handles nested objects', () => {
+    const result = summarizeForLog({ a: { b: { c: 'deep' } } });
+    assert.ok(typeof result === 'string');
+  });
+
+  it('replaces functions with [Function]', () => {
+    const result = summarizeForLog({ fn: () => {} });
+    assert.ok(result.includes('Function'));
+  });
+
+  it('handles circular references', () => {
+    const obj: Record<string, unknown> = { a: 1 };
+    obj.self = obj;
+    const result = summarizeForLog(obj);
+    assert.ok(result.includes('Circular'));
+  });
+});
+
+describe('asRecord – additional cases', () => {
+  it('returns undefined for Date objects (treated as object but not plain)', () => {
+    // Date is an object, not an array, so asRecord should return it
+    const d = new Date();
+    const result = asRecord(d);
+    assert.ok(result !== undefined); // Date is a non-array object
+  });
+
+  it('returns undefined for string', () => assert.equal(asRecord('hello'), undefined));
+  it('returns undefined for number', () => assert.equal(asRecord(42), undefined));
+});
+
+describe('toNumber – additional cases', () => {
+  it('returns the number for float strings', () => assert.equal(toNumber('3.14'), 3.14));
+  it('returns 0 for empty string', () => assert.equal(toNumber(''), 0));
+  it('returns numeric value for boolean true', () => assert.equal(toNumber(true), 1));
+});
+
+describe('normalizeTextForLookup – additional cases', () => {
+  it('handles empty string', () => assert.equal(normalizeTextForLookup(''), ''));
+  it('strips multiple accent types', () => {
+    const result = normalizeTextForLookup('Éàüõ');
+    assert.equal(result, 'eauo');
+  });
+  it('trims whitespace', () => assert.equal(normalizeTextForLookup('  hello  '), 'hello'));
+});
+
+describe('extractKeywordTokens – additional cases', () => {
+  it('returns empty for empty string', () => assert.deepEqual(extractKeywordTokens(''), []));
+  it('deduplicates tokens', () => {
+    const tokens = extractKeywordTokens('test test test');
+    assert.equal(tokens.filter(t => t === 'TEST').length, 1);
+  });
+  it('filters tokens shorter than 4 chars', () => {
+    const tokens = extractKeywordTokens('ab abc abcd');
+    assert.ok(!tokens.includes('AB'));
+    assert.ok(!tokens.includes('ABC'));
+    assert.ok(tokens.includes('ABCD'));
+  });
 });

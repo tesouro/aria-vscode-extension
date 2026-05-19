@@ -62,17 +62,20 @@ function toYamlText(input) {
             const entries = [];
             for (const epRaw of rest) {
                 const ep = normalizeMultilineStrings(epRaw);
-                const tx = ep && typeof ep === 'object' && Object.prototype.hasOwnProperty.call(ep, 'TX_CODIGO') ? (0, utils_1.toStringSafe)(ep['TX_CODIGO']) : undefined;
+                const multilineKeys = Object.entries(ep || {}).filter(([, v]) => typeof v === 'string' && /[\r\n]/.test(String(v))).map(([k]) => k);
                 const epWithout = { ...ep };
-                delete epWithout.TX_CODIGO;
+                for (const k of multilineKeys) {
+                    delete epWithout[k];
+                }
                 const dumpedEp = yaml.dump(epWithout, { noRefs: true, sortKeys: false, lineWidth: -1 }).trim();
                 const baseLines = dumpedEp.length ? dumpedEp.split('\n') : [];
                 const prefixedLines = baseLines.map((l, i) => i === 0 ? `  - ${l}` : `    ${l}`);
-                if (tx !== undefined) {
-                    const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
-                    const txLines = normalizedTx.split(/\r\n|\r|\n/);
-                    prefixedLines.push('    TX_CODIGO: |-');
-                    for (const l of txLines) {
+                for (const key of multilineKeys) {
+                    const rawVal = (0, utils_1.toStringSafe)(ep[key]);
+                    const normalizedVal = rawVal.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+                    const valLines = normalizedVal.split(/\r\n|\r|\n/);
+                    prefixedLines.push(`    ${key}: |-`);
+                    for (const l of valLines) {
                         prefixedLines.push(`      ${l}`);
                     }
                 }
@@ -82,18 +85,26 @@ function toYamlText(input) {
             const prefix = head && String(head).trim().length > 0 ? `${head}\n` : '';
             return `${prefix}${restBlock}\n`;
         }
-        if (Object.prototype.hasOwnProperty.call(obj, 'TX_CODIGO')) {
-            const tx = (0, utils_1.toStringSafe)(obj['TX_CODIGO']);
+        // If any top-level string property contains newlines, emit them as block literals
+        const topMultilineKeys = Object.entries(obj).filter(([, v]) => typeof v === 'string' && /[\r\n]/.test(String(v))).map(([k]) => k);
+        if (topMultilineKeys.length > 0) {
             const without = { ...obj };
-            delete without.TX_CODIGO;
+            for (const k of topMultilineKeys) {
+                delete without[k];
+            }
             const dumped = yaml.dump(without, { noRefs: true, sortKeys: false, lineWidth: -1 });
-            // Build block literal for TX_CODIGO preserving CRLF and LF sequences
-            const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
-            const lines = normalizedTx.split(/\r\n|\r|\n/);
-            const indented = lines.map((l) => `  ${l}`).join('\n');
-            const block = `TX_CODIGO: |-\n${indented}\n`;
+            const blocks = [];
+            for (const key of topMultilineKeys) {
+                const rawVal = (0, utils_1.toStringSafe)(obj[key]);
+                const normalizedVal = rawVal.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+                const lines = normalizedVal.split(/\r\n|\r|\n/);
+                blocks.push(`${key}: |-`);
+                for (const l of lines) {
+                    blocks.push(`  ${l}`);
+                }
+            }
             const prefix = (dumped && String(dumped).trim().length > 0) ? `${dumped.trimEnd()}\n` : '';
-            return `${prefix}${block}`;
+            return `${prefix}${blocks.join('\n')}\n`;
         }
     }
     return yaml.dump(normalized, { noRefs: true, sortKeys: false, lineWidth: -1 });
@@ -111,15 +122,22 @@ function toTomlText(input) {
             const tables = [];
             for (const epRaw of rest) {
                 const ep = normalizeMultilineStrings(epRaw);
-                const tx = ep && typeof ep === 'object' && Object.prototype.hasOwnProperty.call(ep, 'TX_CODIGO') ? (0, utils_1.toStringSafe)(ep['TX_CODIGO']) : undefined;
+                const multilineKeys = Object.entries(ep || {}).filter(([, v]) => typeof v === 'string' && /[\r\n]/.test(String(v))).map(([k]) => k);
                 const epWithout = { ...ep };
-                delete epWithout.TX_CODIGO;
+                for (const k of multilineKeys) {
+                    delete epWithout[k];
+                }
                 const dumpedEp = toml.stringify(epWithout).trim();
                 const prefix = `[[REST_CUSTOM]]\n`;
-                if (tx !== undefined) {
-                    const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
-                    const escaped = normalizedTx.replace(/"""/g, '\\"\\"\\"');
-                    tables.push(`${prefix}${dumpedEp}\nTX_CODIGO = """${escaped}"""`);
+                if (multilineKeys.length > 0) {
+                    const parts = [prefix + dumpedEp];
+                    for (const key of multilineKeys) {
+                        const rawVal = (0, utils_1.toStringSafe)(ep[key]);
+                        const normalizedVal = rawVal.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+                        const escaped = normalizedVal.replace(/"""/g, '\\"\\"\\"');
+                        parts.push(`${key} = """${escaped}"""`);
+                    }
+                    tables.push(parts.join('\n'));
                 }
                 else {
                     tables.push(`${prefix}${dumpedEp}`);
@@ -128,17 +146,23 @@ function toTomlText(input) {
             const prefixHead = head && String(head).trim().length > 0 ? `${head}\n\n` : '';
             return `${prefixHead}${tables.join('\n\n')}\n`;
         }
-        if (Object.prototype.hasOwnProperty.call(obj, 'TX_CODIGO')) {
-            const tx = (0, utils_1.toStringSafe)(obj['TX_CODIGO']);
+        // Top-level multiline string properties
+        const topMultilineKeys = Object.entries(obj).filter(([, v]) => typeof v === 'string' && /[\r\n]/.test(String(v))).map(([k]) => k);
+        if (topMultilineKeys.length > 0) {
             const without = { ...obj };
-            delete without.TX_CODIGO;
+            for (const k of topMultilineKeys) {
+                delete without[k];
+            }
             const dumped = toml.stringify(without);
-            // Preserve CRLF and LF; escape triple quotes inside the content
-            const normalizedTx = tx.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
-            const escaped = normalizedTx.replace(/"""/g, '\\"\\"\\"');
-            const block = `TX_CODIGO = """${escaped}"""\n`;
+            const blocks = [];
+            for (const key of topMultilineKeys) {
+                const rawVal = (0, utils_1.toStringSafe)(obj[key]);
+                const normalizedVal = rawVal.replace(/\\r\\n/g, '\r\n').replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\u000A/g, '\n').replace(/\\u000D/g, '\r');
+                const escaped = normalizedVal.replace(/"""/g, '\\"\\"\\"');
+                blocks.push(`${key} = """${escaped}"""`);
+            }
             const prefix = (dumped && String(dumped).trim().length > 0) ? `${dumped.trimEnd()}\n` : '';
-            return `${prefix}${block}`;
+            return `${prefix}${blocks.join('\n')}\n`;
         }
     }
     return toml.stringify(normalized);

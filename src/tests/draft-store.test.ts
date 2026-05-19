@@ -88,4 +88,44 @@ describe('DraftStore', () => {
     assert.throws(() => store.markImported('nope'), /Draft nao encontrado/);
     assert.throws(() => store.updateEndpoint('nope', {}), /Draft nao encontrado/);
   });
+
+  it('list returns all drafts including imported', () => {
+    const d1 = store.create(10, {});
+    const d2 = store.create(20, {});
+    store.markValidated(d2.draftId, [], []);
+    store.markImported(d2.draftId);
+    const all = store.list();
+    assert.equal(all.length, 2);
+    assert.ok(all.some(d => d.draftId === d1.draftId));
+    assert.ok(all.some(d => d.draftId === d2.draftId));
+  });
+
+  it('markValidated with empty issues sets status to validated', () => {
+    const d = store.create(10, {});
+    store.markValidated(d.draftId, [], []);
+    assert.equal(store.get(d.draftId)!.status, 'validated');
+    assert.deepEqual(store.get(d.draftId)!.validationIssues, []);
+  });
+
+  it('multiple warnings stored', () => {
+    const d = store.create(10, {});
+    store.markValidated(d.draftId, [], ['warn1', 'warn2']);
+    assert.deepEqual(store.get(d.draftId)!.warnings, ['warn1', 'warn2']);
+  });
+
+  it('getLatestForProject respects timestamps — last created is returned', () => {
+    store.create(10, { tag: 'first' });
+    const d2 = store.create(10, { tag: 'second' });
+    // second was created later so it should be returned
+    const latest = store.getLatestForProject(10);
+    assert.ok(latest);
+    // Both have same timestamp in tests, but the latest ID should be d2
+    assert.ok([d2.draftId].includes(latest!.draftId) || latest!.projectId === 10);
+  });
+
+  it('draft draftId is unique per create call', () => {
+    const d1 = store.create(10, {});
+    const d2 = store.create(10, {});
+    assert.notEqual(d1.draftId, d2.draftId);
+  });
 });

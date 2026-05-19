@@ -84,4 +84,29 @@ describe('validateEndpointPayload', () => {
     const errors = validateEndpointPayload({ NO_REST_CUSTOM: '' }, validations as any);
     assert.ok(errors.includes('Nome obrigatorio'));
   });
+
+  it('skips validation when condition type is "never"', () => {
+    const validations = [{
+      VALIDATION_NAME: 'V2',
+      VALIDATION_TYPE: 'Item\\Column Specified Is Not Null',
+      VALIDATION_EXPRESSION1: 'TX_PATH',
+      VALIDATION_FAILURE_TEXT: 'Path obrigatorio',
+      REGION_SEQUENCE: 1,
+      VALIDATION_SEQUENCE: 2,
+      CONDITION_TYPE: 'never',
+      CONDITION_EXPRESSION1: '',
+      CONDITION_EXPRESSION2: '',
+    }];
+    const errors = validateEndpointPayload({ TX_PATH: '' }, validations as any);
+    assert.ok(!errors.includes('Path obrigatorio'));
+  });
+});
+
+describe('isMissingRequiredField – additional edge cases', () => {
+  it('number 1 is present', () => assert.ok(!isMissingRequiredField('ID_METODO', 1)));
+  it('ID_ prefix: negative is missing (<=0)', () => assert.ok(isMissingRequiredField('ID_METODO', -1)));
+  it('ID_ prefix: 0 is missing', () => assert.ok(isMissingRequiredField('ID_TIPO_CODIGO', 0)));
+  it('non-ID_ field: 0 is present (number)', () => assert.ok(!isMissingRequiredField('NR_VERSAO', 0)));
+  it('false boolean is present', () => assert.ok(!isMissingRequiredField('SN_FLAG', false)));
+  it('object is present', () => assert.ok(!isMissingRequiredField('OBJ', {})));
 });
