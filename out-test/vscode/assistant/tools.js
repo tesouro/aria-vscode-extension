@@ -445,7 +445,38 @@ function registerTools(context, state, output) {
                 }
                 // Simplified: delegate to importar-json endpoint directly
                 const client = state.getClient();
-                await client.saveDataset(inputPayloadRaw);
+                const copyForSend = JSON.parse(JSON.stringify(inputPayloadRaw));
+                // normalize empty strings to null before sending
+                const normalizeEmptyStringsToNull = (obj) => {
+                    if (obj === null || obj === undefined) {
+                        return;
+                    }
+                    if (Array.isArray(obj)) {
+                        for (let i = 0; i < obj.length; i++) {
+                            const v = obj[i];
+                            if (v === '' || (typeof v === 'string' && v.trim() === '')) {
+                                obj[i] = null;
+                            }
+                            else if (typeof v === 'object' && v !== null) {
+                                normalizeEmptyStringsToNull(v);
+                            }
+                        }
+                        return;
+                    }
+                    if (typeof obj === 'object') {
+                        for (const k of Object.keys(obj)) {
+                            const v = obj[k];
+                            if (v === '' || (typeof v === 'string' && v.trim() === '')) {
+                                obj[k] = null;
+                            }
+                            else if (typeof v === 'object' && v !== null) {
+                                normalizeEmptyStringsToNull(v);
+                            }
+                        }
+                    }
+                };
+                normalizeEmptyStringsToNull(copyForSend);
+                await client.saveDataset(copyForSend);
                 state.dataset = await client.getProjectEndpointTree();
                 return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart('JSON importado com sucesso. Arvore atualizada.')]);
             }

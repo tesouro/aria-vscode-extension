@@ -15,7 +15,14 @@ export class AriaApiClient {
   ) {}
 
   async connect(): Promise<void> {
-    await this.getProjectEndpointTree();
+    try {
+      await this.getProjectEndpointTree();
+      this.logger?.(`Lista de projetos carregada com sucesso após login automático.` as any as string);
+    } catch (error) {
+      const msg = `Falha ao carregar a lista de projetos após login automático. ${error instanceof Error ? error.message : String(error)}`;
+      this.logger?.(msg as any as string);
+      throw error;
+    }
   }
 
   async close(): Promise<void> {}
@@ -164,6 +171,8 @@ export class AriaApiClient {
       ID_PROJETO: toNumber(source.ID_PROJETO ?? source.id_projeto),
       NO_PROJETO: toStringSafe(source.NO_PROJETO ?? source.nome_projeto),
       TX_PATH: toStringSafe(source.TX_PATH ?? source.path_projeto),
+      url: toStringSafe(source.url ?? source.URL),
+      url_apex: toStringSafe(source.url_apex ?? source.URL_APEX),
       REST_CUSTOM: endpoints.map((ep) => this.mapEndpoint(ep)),
     };
   }
@@ -175,6 +184,8 @@ export class AriaApiClient {
       ID_REST_CUSTOM: toNumber(source.ID_REST_CUSTOM ?? source.id_endpoint),
       NO_REST_CUSTOM: toStringSafe(source.NO_REST_CUSTOM ?? source.nome_endpoint),
       TX_PATH: toStringSafe(source.TX_PATH ?? source.path_endpoint),
+      url: toStringSafe(source.url ?? source.URL),
+      url_apex: toStringSafe(source.url_apex ?? source.URL_APEX),
       TX_CODIGO: typeof source.TX_CODIGO === 'string' ? source.TX_CODIGO : undefined,
     };
     if (mapped.ID_REST_CUSTOM <= 0) { throw new Error('Endpoint retornado pela API sem ID valido.'); }

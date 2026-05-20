@@ -41,10 +41,22 @@ class AriaApiClient {
         return this.normalizeDataset(response);
     }
     async saveDataset(dataset) {
-        await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
+        const response = await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, dataset);
+        const root = (0, utils_1.asRecord)(response) || {};
+        if (typeof root.status === 'string' && root.status.toLowerCase() === 'erro') {
+            const codigo = root.codigo != null ? (0, utils_1.toStringSafe)(root.codigo) : undefined;
+            const mensagem = typeof root.mensagem === 'string' ? root.mensagem : undefined;
+            throw new Error(`Importar JSON falhou${codigo ? ` (codigo ${codigo})` : ''}${mensagem ? `: ${mensagem}` : ''}`);
+        }
     }
     async saveProject(project) {
-        await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, { registros: [project] });
+        const response = await this.request('POST', '/v1/aria-vscode/custom/importar-json', undefined, { registros: [project] });
+        const root = (0, utils_1.asRecord)(response) || {};
+        if (typeof root.status === 'string' && root.status.toLowerCase() === 'erro') {
+            const codigo = root.codigo != null ? (0, utils_1.toStringSafe)(root.codigo) : undefined;
+            const mensagem = typeof root.mensagem === 'string' ? root.mensagem : undefined;
+            throw new Error(`Importar JSON falhou${codigo ? ` (codigo ${codigo})` : ''}${mensagem ? `: ${mensagem}` : ''}`);
+        }
     }
     async importarJsonEndpoint(projectId, endpointJson) {
         const query = { p_id_projeto: String(projectId) };
@@ -146,6 +158,8 @@ class AriaApiClient {
             ID_PROJETO: (0, utils_1.toNumber)(source.ID_PROJETO ?? source.id_projeto),
             NO_PROJETO: (0, utils_1.toStringSafe)(source.NO_PROJETO ?? source.nome_projeto),
             TX_PATH: (0, utils_1.toStringSafe)(source.TX_PATH ?? source.path_projeto),
+            url: (0, utils_1.toStringSafe)(source.url ?? source.URL),
+            url_apex: (0, utils_1.toStringSafe)(source.url_apex ?? source.URL_APEX),
             REST_CUSTOM: endpoints.map((ep) => this.mapEndpoint(ep)),
         };
     }
@@ -156,6 +170,8 @@ class AriaApiClient {
             ID_REST_CUSTOM: (0, utils_1.toNumber)(source.ID_REST_CUSTOM ?? source.id_endpoint),
             NO_REST_CUSTOM: (0, utils_1.toStringSafe)(source.NO_REST_CUSTOM ?? source.nome_endpoint),
             TX_PATH: (0, utils_1.toStringSafe)(source.TX_PATH ?? source.path_endpoint),
+            url: (0, utils_1.toStringSafe)(source.url ?? source.URL),
+            url_apex: (0, utils_1.toStringSafe)(source.url_apex ?? source.URL_APEX),
             TX_CODIGO: typeof source.TX_CODIGO === 'string' ? source.TX_CODIGO : undefined,
         };
         if (mapped.ID_REST_CUSTOM <= 0) {

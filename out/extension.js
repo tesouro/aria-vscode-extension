@@ -91,6 +91,38 @@ function isValidateCodeSuccess(status) {
     const s = (0, utils_1.toStringSafe)(status).toLowerCase().trim();
     return s === 'sucesso' || s === 'ok' || s === 'success';
 }
+function getSafeUrl(value) {
+    return (0, utils_1.toStringSafe)(value).trim();
+}
+async function openUrlInBrowser(urlValue, errorMessage) {
+    const url = getSafeUrl(urlValue);
+    if (!url) {
+        vscode.window.showWarningMessage(errorMessage);
+        return;
+    }
+    try {
+        const decoded = decodeURIComponent(url);
+        await vscode.env.openExternal(vscode.Uri.parse(decoded));
+    }
+    catch {
+        await vscode.env.openExternal(vscode.Uri.parse(url));
+    }
+}
+async function copyUrlToClipboard(urlValue, errorMessage, successMessage) {
+    const url = getSafeUrl(urlValue);
+    if (!url) {
+        vscode.window.showWarningMessage(errorMessage);
+        return;
+    }
+    try {
+        const decoded = decodeURIComponent(url);
+        await vscode.env.clipboard.writeText(decoded);
+    }
+    catch {
+        await vscode.env.clipboard.writeText(url);
+    }
+    vscode.window.showInformationMessage(successMessage);
+}
 function toYamlText(input) {
     const normalized = normalizeMultilineStrings(input);
     if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) {
@@ -1028,6 +1060,28 @@ function activate(context) {
                 draft.registros[idx] = mergePreservingTypes(draft.registros[idx], normalized);
             });
         });
+    }), vscode.commands.registerCommand('aria.openProjectDocumentation', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const url = node.project.url ?? node.project.URL;
+        if ((0, utils_1.toStringSafe)(url).trim()) {
+            await openUrlInBrowser(url, 'Projeto sem url de documentacao definida.');
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        await openUrlInBrowser(project.url ?? project.URL, 'Projeto sem url de documentacao definida.');
+    }), vscode.commands.registerCommand('aria.openProjectApex', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const urlApex = node.project.url_apex ?? node.project.URL_APEX;
+        if ((0, utils_1.toStringSafe)(urlApex).trim()) {
+            await openUrlInBrowser(urlApex, 'Projeto sem url do APEX definida.');
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        await openUrlInBrowser(project.url_apex ?? project.URL_APEX, 'Projeto sem url do APEX definida.');
     }), vscode.commands.registerCommand('aria.createProject', async () => {
         if (!state.client) {
             vscode.window.showWarningMessage('Conecte primeiro.');
@@ -1137,6 +1191,36 @@ function activate(context) {
                 txCodigo: (0, utils_1.toStringSafe)(merged.TX_CODIGO),
             });
         }, async (payload) => state.getClient().getPrevia(payload));
+    }), vscode.commands.registerCommand('aria.copyEndpointUrl', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const endpointUrl = node.endpoint.url ?? node.endpoint.URL;
+        if ((0, utils_1.toStringSafe)(endpointUrl).trim()) {
+            await copyUrlToClipboard(endpointUrl, 'Endpoint sem url definida.', 'URL do endpoint copiada para a area de transferencia.');
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        await copyUrlToClipboard(endpoint.url ?? endpoint.URL, 'Endpoint sem url definida.', 'URL do endpoint copiada para a area de transferencia.');
+    }), vscode.commands.registerCommand('aria.openEndpointApex', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const endpointApex = node.endpoint.url_apex ?? node.endpoint.URL_APEX;
+        if ((0, utils_1.toStringSafe)(endpointApex).trim()) {
+            await openUrlInBrowser(endpointApex, 'Endpoint sem url do APEX definida.');
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        await openUrlInBrowser(endpoint.url_apex ?? endpoint.URL_APEX, 'Endpoint sem url do APEX definida.');
     }), vscode.commands.registerCommand('aria.openEndpointMetadata', async (node) => {
         if (!state.client || !state.dataset) {
             return;

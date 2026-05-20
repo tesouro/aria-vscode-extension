@@ -137,6 +137,16 @@
         "icon": "$(list-tree)"
       },
       {
+        "command": "aria.openProjectDocumentation",
+        "title": "Abrir Documentacao do Projeto",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "aria.openProjectApex",
+        "title": "Editar no APEX",
+        "icon": "$(link-external)"
+      },
+      {
         "command": "aria.editEndpointCode",
         "title": "Editar Código",
         "icon": "$(edit)"
@@ -165,6 +175,16 @@
         "command": "aria.openEndpointMetadata",
         "title": "Ver Metadados",
         "icon": "$(database)"
+      },
+      {
+        "command": "aria.copyEndpointUrl",
+        "title": "Copiar URL do Endpoint",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "aria.openEndpointApex",
+        "title": "Editar no APEX",
+        "icon": "$(link-external)"
       },
       {
         "command": "aria.saveActiveEditor",
@@ -277,6 +297,16 @@
           "group": "aria@6"
         },
         {
+          "command": "aria.copyEndpointUrl",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@7"
+        },
+        {
+          "command": "aria.openEndpointApex",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@8"
+        },
+        {
           "command": "aria.createEndpoint",
           "when": "view == ariaProjectsView && viewItem == ariaProject",
           "group": "inline"
@@ -305,6 +335,16 @@
           "command": "aria.editProjectForm",
           "when": "view == ariaProjectsView && viewItem == ariaProject",
           "group": "aria@5"
+        },
+        {
+          "command": "aria.openProjectDocumentation",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@6"
+        },
+        {
+          "command": "aria.openProjectApex",
+          "when": "view == ariaProjectsView && viewItem == ariaProject",
+          "group": "aria@7"
         }
       ],
       "editor/title": [

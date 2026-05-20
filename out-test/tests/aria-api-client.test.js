@@ -85,6 +85,27 @@ function makeClient() {
         assert.equal(project.REST_CUSTOM.length, 1);
         assert.equal(project.REST_CUSTOM[0].NO_REST_CUSTOM, 'EAlt');
     });
+    (0, node_test_1.it)('normalizes url/url_apex from uppercase and lowercase fields', () => {
+        const client = makeClient();
+        const lower = client.mapProject({
+            ID_PROJETO: 10,
+            NO_PROJETO: 'Lower',
+            TX_PATH: 'lower',
+            url: 'https://lower/docs',
+            url_apex: 'https://lower/apex',
+        });
+        assert.equal(lower.url, 'https://lower/docs');
+        assert.equal(lower.url_apex, 'https://lower/apex');
+        const upper = client.mapProject({
+            ID_PROJETO: 11,
+            NO_PROJETO: 'Upper',
+            TX_PATH: 'upper',
+            URL: 'https://upper/docs',
+            URL_APEX: 'https://upper/apex',
+        });
+        assert.equal(upper.url, 'https://upper/docs');
+        assert.equal(upper.url_apex, 'https://upper/apex');
+    });
     (0, node_test_1.it)('produces empty REST_CUSTOM when neither key exists', () => {
         const client = makeClient();
         const project = client.mapProject({ ID_PROJETO: 1, NO_PROJETO: 'P', TX_PATH: 'p' });
@@ -108,6 +129,15 @@ function makeClient() {
         const ep = client.mapEndpoint(raw);
         assert.equal(ep.ID_REST_CUSTOM, 7);
         assert.equal(ep.NO_REST_CUSTOM, 'AliasEP');
+    });
+    (0, node_test_1.it)('normalizes endpoint url/url_apex from uppercase and lowercase fields', () => {
+        const client = makeClient();
+        const lower = client.mapEndpoint({ id_endpoint: 8, nome_endpoint: 'LowerEP', path_endpoint: 'p/lower', url: 'https://ep/lower', url_apex: 'https://ep/lower/apex' });
+        assert.equal(lower.url, 'https://ep/lower');
+        assert.equal(lower.url_apex, 'https://ep/lower/apex');
+        const upper = client.mapEndpoint({ ID_REST_CUSTOM: 9, NO_REST_CUSTOM: 'UpperEP', TX_PATH: 'p/upper', URL: 'https://ep/upper', URL_APEX: 'https://ep/upper/apex' });
+        assert.equal(upper.url, 'https://ep/upper');
+        assert.equal(upper.url_apex, 'https://ep/upper/apex');
     });
     (0, node_test_1.it)('throws when ID_REST_CUSTOM is 0 or missing', () => {
         const client = makeClient();
