@@ -17,7 +17,15 @@ class AriaApiClient {
         this.logger = logger;
     }
     async connect() {
-        await this.getProjectEndpointTree();
+        try {
+            await this.getProjectEndpointTree();
+            this.logger?.(`Lista de projetos carregada com sucesso após login automático.`);
+        }
+        catch (error) {
+            const msg = `Falha ao carregar a lista de projetos após login automático. ${error instanceof Error ? error.message : String(error)}`;
+            this.logger?.(msg);
+            throw error;
+        }
     }
     async close() { }
     async getDataset(fetchProjectPath = this.settings.fetchProjectPath) {
@@ -218,12 +226,13 @@ class AriaApiClient {
         }
         const payload = body === undefined ? undefined : JSON.stringify(body);
         try {
-            const bodyPreview = (endpointPath.includes('/importar-json-endpoint'))
+            const isFullBodyLog = endpointPath.includes('/importar-json-endpoint') || endpointPath.includes('/get-previa');
+            const bodyPreview = isFullBodyLog
                 ? (body === undefined ? undefined : JSON.parse(JSON.stringify(body)))
                 : this.buildRequestBodyForLog(endpointPath, body);
             this.logger?.(`[${new Date().toISOString()}] ms-aria request => ${method} ${url.pathname}${url.search}\n` +
                 `  query: ${(0, utils_1.summarizeForLog)(query)}\n` +
-                `  body: ${endpointPath.includes('/importar-json-endpoint') ? JSON.stringify(bodyPreview, null, 2) : (0, utils_1.summarizeForLog)(bodyPreview)}`);
+                `  body: ${isFullBodyLog ? JSON.stringify(bodyPreview, null, 2) : (0, utils_1.summarizeForLog)(bodyPreview)}`);
         }
         catch (e) {
             this.logger?.(`[${new Date().toISOString()}] ms-aria request => ${method} ${url.pathname}${url.search} (failed to build log: ${String(e)})`);

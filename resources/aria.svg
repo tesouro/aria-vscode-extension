@@ -1,4 +1,13 @@
-<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
-  <rect x="8" y="8" width="112" height="112" rx="18" fill="#0C4A6E"/>
-  <path d="M30 92L54 34H74L98 92H83L76 74H52L45 92H30ZM57 62H71L64 45L57 62Z" fill="#F8FAFC"/>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Musical note icon">
+  <defs>
+    <linearGradient id="bg" x1="14" y1="14" x2="114" y2="114" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F766E"/>
+      <stop offset="1" stop-color="#115E59"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="20" fill="url(#bg)"/>
+  <circle cx="54" cy="86" r="14" fill="#F8FAFC"/>
+  <circle cx="90" cy="78" r="14" fill="#F8FAFC"/>
+  <rect x="72" y="30" width="12" height="56" rx="6" fill="#F8FAFC"/>
+  <path d="M84 34L100 30C104.4 28.9 108 31.9 108 36.4V46L84 52V34Z" fill="#F8FAFC"/>
 </svg>

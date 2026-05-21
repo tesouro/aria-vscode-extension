@@ -153,6 +153,7 @@ export function buildFormHtml(title: string, data: Record<string, unknown>, excl
     const hasLovOptions = Boolean(fieldOptions) || isBancoEsquema;
     const isBoolean = meta ? meta.displayAs.toLowerCase().includes('checkbox') || ((strVal === 'S' || strVal === 'N') && /^SN_/.test(key)) : /^SN_/.test(key) && (strVal === 'S' || strVal === 'N');
     const isReadonly = Boolean(meta?.displayOnly) || ((/^ID_/.test(key) || key === 'TX_URL') && !hasLovOptions);
+    if (isReadonly && !strVal.trim()) { continue; }
     const isCode = key === 'TX_CODIGO' || key === 'TX_SCRIPT_CUSTOM';
     const isLong = isCode || (meta?.displayAs || '').toLowerCase().includes('textarea') || strVal.length > 120 || /^DS_|^TX_COMENTARIOS|^TX_PERFIS|^TX_IPS|^TX_SECRET_META_API/.test(key);
     const section = meta?.region || getFieldSection(key);
@@ -201,8 +202,9 @@ export function buildFormHtml(title: string, data: Record<string, unknown>, excl
   const renderedSections = sectionOrder.map((section) => {
     const content = sectionFields.get(section);
     if (!content?.length) { return ''; }
-    const sm = endpointMeta ? { title: section, description: 'Agrupamento conforme metadata da tela APEX.' } : getSectionMeta(section);
-    return `<section class="panel-card"><div class="panel-head"><div><p class="eyebrow">Formulario JSON</p><h3>${escHtml(sm.title)}</h3></div><p>${escHtml(sm.description)}</p></div><div class="fields-grid">${content.join('\n')}</div></section>`;
+    const sm = endpointMeta ? { title: section, description: '' } : getSectionMeta(section);
+    const headerDescription = sm.description ? `<p>${escHtml(sm.description)}</p>` : '';
+    return `<section class="panel-card"><div class="panel-head"><div><h3>${escHtml(sm.title)}</h3></div>${headerDescription}</div><div class="fields-grid">${content.join('\n')}</div></section>`;
   }).join('\n');
 
   const isSqlEndpoint = data['ID_TIPO_CODIGO'] === 1 || data['ID_TIPO_CODIGO'] === '1';

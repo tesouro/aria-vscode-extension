@@ -20,14 +20,14 @@
         {
           "id": "ariaExplorer",
           "title": "ARIA",
-          "icon": "resources/aria.svg"
+          "icon": "resources/aria-sidebar.svg"
         }
       ],
       "panel": [
         {
           "id": "ariaPreviewPanel",
           "title": "ARIA Query Result",
-          "icon": "resources/aria.svg"
+          "icon": "resources/aria-sidebar.svg"
         }
       ]
     },
@@ -36,19 +36,19 @@
         {
           "id": "ariaProjectsView",
           "name": "Projetos ARIA",
-          "icon": "resources/aria.svg"
+          "icon": "resources/aria-sidebar.svg"
         },
         {
           "id": "ariaMetadataView",
           "name": "Metadados do Banco",
-          "icon": "resources/aria.svg"
+          "icon": "resources/aria-sidebar.svg"
         }
       ],
       "ariaPreviewPanel": [
         {
           "id": "ariaQueryResultView",
           "name": "ARIA Query Result",
-          "icon": "resources/aria.svg",
+          "icon": "resources/aria-sidebar.svg",
           "type": "webview"
         }
       ]
