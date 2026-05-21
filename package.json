@@ -172,6 +172,11 @@
         "icon": "$(list-tree)"
       },
       {
+        "command": "aria.editEndpointParameters",
+        "title": "Editar Parâmetros",
+        "icon": "$(symbol-parameter)"
+      },
+      {
         "command": "aria.openEndpointMetadata",
         "title": "Ver Metadados",
         "icon": "$(database)"
@@ -290,6 +295,11 @@
           "command": "aria.editEndpointForm",
           "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
           "group": "aria@5"
+        },
+        {
+          "command": "aria.editEndpointParameters",
+          "when": "view == ariaProjectsView && viewItem == ariaEndpoint",
+          "group": "aria@2"
         },
         {
           "command": "aria.openEndpointMetadata",
@@ -669,6 +679,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "build": "npm run compile",
+    "main": "npm run compile",
     "watch": "tsc -watch -p ./",
     "test": "tsc -p tsconfig.test.json && node --require ./out-test/tests/vscode-mock.js --test out-test/tests/*.test.js"
   },

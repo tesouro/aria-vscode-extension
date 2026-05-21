@@ -23,6 +23,7 @@ const metadata_tree_provider_1 = require("./vscode/tree/metadata-tree-provider")
 const virtual_fs_provider_1 = require("./vscode/editors/virtual-fs-provider");
 const form_webview_1 = require("./vscode/editors/form-webview");
 const preview_params_webview_1 = require("./vscode/editors/preview-params-webview");
+const variable_editor_webview_1 = require("./vscode/editors/variable-editor-webview");
 const preview_result_view_1 = require("./vscode/editors/preview-result-view");
 const tools_1 = require("./vscode/assistant/tools");
 const chat_participant_1 = require("./vscode/assistant/chat-participant");
@@ -1191,6 +1192,46 @@ function activate(context) {
                 txCodigo: (0, utils_1.toStringSafe)(merged.TX_CODIGO),
             });
         }, async (payload) => state.getClient().getPrevia(payload));
+    }), vscode.commands.registerCommand('aria.editEndpointParameters', async (node) => {
+        if (!state.dataset || !node) {
+            return;
+        }
+        const project = await state.getProjectDetails(node.project.ID_PROJETO);
+        const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+        if (!endpoint) {
+            throw new Error('Endpoint nao encontrado.');
+        }
+        const activeEditor = vscode.window.activeTextEditor;
+        const activeMarker = activeEditor ? state.editMap.get(activeEditor.document.uri.toString()) : undefined;
+        const activeEndpointCode = activeMarker && activeMarker.type === 'endpointCode'
+            && activeMarker.projectId === node.project.ID_PROJETO
+            && activeMarker.id === node.endpoint.ID_REST_CUSTOM
+            ? activeEditor?.document.getText()
+            : undefined;
+        const sourceCode = activeEndpointCode ?? String(endpoint.TX_CODIGO || '');
+        // Prepare variable list: existing VARIABLE normalized or extracted from code
+        const existingVars = Array.isArray(endpoint.VARIABLE) ? endpoint.VARIABLE : [];
+        const extracted = (0, endpoint_normalizer_1.extractVariablesFromCode)(sourceCode) || [];
+        // Exclude auto-detection of variables that begin with 'aria_'
+        const extractedFiltered = extracted.filter((v) => { const n = String(v && v.name || '').trim(); return !/^aria_/i.test(n); });
+        const extractedVars = extractedFiltered.map((v, idx) => ({ ID_VARIABLE: 10000 + idx, NO_VARIABLE: v.name, TX_REGEX_QS: v.name, IN_ORIGEM_VARIABLE: v.origem, TX_DESCRICAO: '' }));
+        const varsToEdit = existingVars.length ? existingVars : extractedVars;
+        (0, variable_editor_webview_1.openVariableEditorWebview)(context, `Parâmetros: ${endpoint.NO_REST_CUSTOM}`, varsToEdit, sourceCode, async (updated) => {
+            const nv = (0, endpoint_normalizer_1.normalizeVariables)(updated || [], (m) => console.debug('[normalizeVariables]', m));
+            if (nv.errors?.length) {
+                throw new Error(nv.errors.join('; '));
+            }
+            await saveWithFreshDataset(`endpointVariables:${node.endpoint.ID_REST_CUSTOM}`, node.project.ID_PROJETO, async (draft) => {
+                for (const p of draft.registros) {
+                    const idx = p.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+                    if (idx >= 0) {
+                        p.REST_CUSTOM[idx] = { ...p.REST_CUSTOM[idx], VARIABLE: nv.normalized };
+                        return;
+                    }
+                }
+                throw new Error('Endpoint nao encontrado.');
+            });
+        });
     }), vscode.commands.registerCommand('aria.copyEndpointUrl', async (node) => {
         if (!state.dataset || !node) {
             return;

@@ -9,7 +9,7 @@ import { ARIA_EDIT_SCHEME } from './core/constants';
 import { toStringSafe, toNumber, toErrorMessage, normalizeEndpointPath, normalizeTextForLookup } from './core/utils';
 import { normalizeCodeTypeLabel } from './domain/endpoints/code-type-resolver';
 import { resolveEndpointCodeExtension } from './domain/endpoints/code-type-resolver';
-import { buildEndpointFromExampleStructure, applyLovDisplayValues } from './domain/endpoints/endpoint-normalizer';
+import { buildEndpointFromExampleStructure, applyLovDisplayValues, extractVariablesFromCode, normalizeVariables } from './domain/endpoints/endpoint-normalizer';
 import { validateEndpointPayload } from './domain/validation/endpoint-validator';
 import { DraftStore } from './domain/assistant/draft-store';
 import { AriaApiClient } from './infrastructure/api/aria-api-client';
@@ -21,6 +21,7 @@ import { ARIA_METADATA_TABLE_MIME, AriaMetadataDragAndDropController, AriaMetada
 import { InMemoryEditFileSystemProvider } from './vscode/editors/virtual-fs-provider';
 import { openFormWebview } from './vscode/editors/form-webview';
 import { openPreviewParamsWebview } from './vscode/editors/preview-params-webview';
+import { openVariableEditorWebview } from './vscode/editors/variable-editor-webview';
 import { SqlPreviewResultViewProvider } from './vscode/editors/preview-result-view';
 import { registerTools } from './vscode/assistant/tools';
 import { registerChatParticipant } from './vscode/assistant/chat-participant';
@@ -1155,6 +1156,45 @@ export function activate(context: vscode.ExtensionContext): void {
           txCodigo: toStringSafe(merged.TX_CODIGO),
         });
       }, async (payload) => state.getClient().getPrevia(payload));
+    }),
+
+    vscode.commands.registerCommand('aria.editEndpointParameters', async (node?: EndpointNode) => {
+      if (!state.dataset || !node) { return; }
+      const project = await state.getProjectDetails(node.project.ID_PROJETO);
+      const endpoint = project.REST_CUSTOM.find((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+      if (!endpoint) { throw new Error('Endpoint nao encontrado.'); }
+
+      const activeEditor = vscode.window.activeTextEditor;
+      const activeMarker = activeEditor ? state.editMap.get(activeEditor.document.uri.toString()) : undefined;
+      const activeEndpointCode = activeMarker && activeMarker.type === 'endpointCode'
+        && activeMarker.projectId === node.project.ID_PROJETO
+        && activeMarker.id === node.endpoint.ID_REST_CUSTOM
+        ? activeEditor?.document.getText()
+        : undefined;
+      const sourceCode = activeEndpointCode ?? String(endpoint.TX_CODIGO || '');
+
+      // Prepare variable list: existing VARIABLE normalized or extracted from code
+      const existingVars = Array.isArray(endpoint.VARIABLE) ? endpoint.VARIABLE as Record<string, unknown>[] : [];
+      const extracted = extractVariablesFromCode(sourceCode) || [];
+      // Exclude auto-detection of variables that begin with 'aria_'
+      const extractedFiltered = extracted.filter((v) => { const n = String(v && v.name || '').trim(); return !/^aria_/i.test(n); });
+      const extractedVars = extractedFiltered.map((v, idx) => ({ ID_VARIABLE: 10000 + idx, NO_VARIABLE: v.name, TX_REGEX_QS: v.name, IN_ORIGEM_VARIABLE: v.origem, TX_DESCRICAO: '' }));
+      const varsToEdit = existingVars.length ? existingVars : extractedVars;
+
+      openVariableEditorWebview(context, `Parâmetros: ${endpoint.NO_REST_CUSTOM}`, varsToEdit, sourceCode, async (updated) => {
+        const nv = normalizeVariables(updated || [], (m) => console.debug('[normalizeVariables]', m));
+        if (nv.errors?.length) { throw new Error(nv.errors.join('; ')); }
+        await saveWithFreshDataset(`endpointVariables:${node.endpoint.ID_REST_CUSTOM}`, node.project.ID_PROJETO, async (draft) => {
+          for (const p of draft.registros) {
+            const idx = p.REST_CUSTOM.findIndex((e) => e.ID_REST_CUSTOM === node.endpoint.ID_REST_CUSTOM);
+            if (idx >= 0) {
+              p.REST_CUSTOM[idx] = { ...p.REST_CUSTOM[idx], VARIABLE: nv.normalized };
+              return;
+            }
+          }
+          throw new Error('Endpoint nao encontrado.');
+        });
+      });
     }),
 
     vscode.commands.registerCommand('aria.copyEndpointUrl', async (node?: EndpointNode) => {
